@@ -1,0 +1,31 @@
+# West manifest — CircuitDojo nRF9151 Feather GPS Tracker
+#
+# This is a freestanding (Zephyr "T2") application. It does not vendor the SDK.
+# Instead it imports CircuitDojo's "nRF9160 Feather Examples and Drivers" (nfed),
+# which provides the `circuitdojo_feather_nrf9151` board definition (nfed is a
+# Zephyr module with board_root: .) and in turn imports the nRF Connect SDK and
+# the pcf85063a RTC driver.
+#
+# Bootstrap a workspace from this repo:
+#   west init -m https://github.com/sbrown7792/hologram-nrf9151-gps-tracker gps-tracker-ws
+#   cd gps-tracker-ws && west update
+#   west build -b circuitdojo_feather_nrf9151/nrf9151/ns application/app
+
+manifest:
+  remotes:
+    - name: circuitdojo
+      url-base: https://github.com/circuitdojo
+
+  projects:
+    - name: nrf9160-feather-examples-and-drivers
+      description: >
+        CircuitDojo nRF9160/nRF9151 Feather board definitions, drivers and
+        samples. Provides the circuitdojo_feather_nrf9151 board and imports the
+        nRF Connect SDK (sdk-nrf) plus the pcf85063a RTC driver.
+      remote: circuitdojo
+      revision: 04972ced2ae63dbfa4712f94ca133e4a45a5a71a
+      path: nfed
+      import: true
+
+  self:
+    path: application

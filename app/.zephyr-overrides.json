@@ -1,0 +1,10 @@
+{
+  "circuitdojo_feather_nrf9151/nrf9151/ns": {
+    "sysbuild": true,
+    "extraConfFiles": [],
+    "extraOverlayFiles": [],
+    "extraCMakeDefines": [],
+    "manifest": "west.yml",
+    "manifestDir": "application"
+  }
+}

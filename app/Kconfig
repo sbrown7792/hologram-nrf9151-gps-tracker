@@ -1,0 +1,63 @@
+# GPS Tracker application options.
+
+mainmenu "GPS Tracker"
+
+config HOLOGRAM_DEVICE_KEY
+	string "Hologram device key (8-character 'Receive from Device' key)"
+	default "CHANGEME"
+	help
+	  Per-device key from the Hologram dashboard (Device page -> Receive from
+	  Device). Used to authenticate to the Embedded Cloud Socket API.
+
+config HOLOGRAM_HOST
+	string "Hologram Cloud Socket hostname"
+	default "cloudsocket.hologram.io"
+
+config HOLOGRAM_PORT
+	int "Hologram Cloud Socket TCP port"
+	default 9999
+
+config HOLOGRAM_TOPIC
+	string "Message topic/tag reported to the Data Engine"
+	default "TRACKER"
+
+config TRACKER_SLEEP_SECONDS
+	int "Sleep between reports when on battery (seconds)"
+	default 540
+	help
+	  Matches the original ~9 minute battery sleep. The sleep is interruptible:
+	  applying external power (VBUS) wakes early and enters the charging loop.
+
+config TRACKER_CHARGING_INTERVAL_SECONDS
+	int "Report interval while externally powered / charging (seconds)"
+	default 60
+
+config TRACKER_GNSS_FIX_TIMEOUT_SECONDS
+	int "Maximum time to wait for a GNSS fix (seconds)"
+	default 120
+
+config TRACKER_GNSS_EXTRA_FIX_SECONDS
+	int "Extra time to keep GNSS running after first fix for better accuracy"
+	default 5
+
+config TRACKER_LTE_CONNECT_TIMEOUT_SECONDS
+	int "Bounded LTE connection attempt timeout (seconds)"
+	default 120
+	help
+	  On failure the tracker sleeps TRACKER_SLEEP_SECONDS and retries, rather
+	  than blocking forever (mirrors the original 'sleep 9 min, try again').
+
+config TRACKER_SKIP_LTE
+	bool "Bench debug: skip LTE, run GNSS-only (no SIM needed)"
+	help
+	  Puts the modem in GNSS-only functional mode instead of connecting to LTE.
+	  GNSS is modem-side and needs no network/SIM, so real fixes still work.
+
+config TRACKER_OFFLINE_DEBUG
+	bool "Bench debug: log the Hologram payload instead of sending it"
+	help
+	  hologram_send() logs the fully composed envelope JSON to the console and
+	  returns success, instead of opening the socket. Lets the whole pipeline be
+	  exercised on the bench without connectivity.
+
+source "Kconfig.zephyr"

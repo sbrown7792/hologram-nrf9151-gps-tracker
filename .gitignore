@@ -1,0 +1,13 @@
+# Zephyr / CMake build output
+build/
+build-*/
+twister-out*/
+
+# West workspace metadata (created by `west init` in the parent workspace)
+.west/
+
+# Editor / OS cruft
+.vscode/
+*.swp
+*~
+.DS_Store

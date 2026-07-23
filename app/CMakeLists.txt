@@ -1,0 +1,24 @@
+#
+# GPS Tracker for CircuitDojo nRF9151 Feather
+#
+# Port of the original Hologram Dash Arduino sketch (../gps_tracker/gps_tracker.ino)
+# to nRF Connect SDK / Zephyr. Sends GPS + telemetry as a JSON string into the
+# Hologram Data Engine via the Embedded Cloud Socket API, preserving the existing
+# REST-API/web-app backend contract.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+cmake_minimum_required(VERSION 3.20.0)
+
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(gps_tracker)
+
+target_sources(app PRIVATE
+	src/main.c
+	src/startup.c
+	src/gnss.c
+	src/power.c
+	src/telemetry.c
+	src/hologram.c
+	src/watchdog.c
+)
