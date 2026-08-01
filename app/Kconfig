@@ -47,6 +47,60 @@ config TRACKER_LTE_CONNECT_TIMEOUT_SECONDS
 	  On failure the tracker sleeps TRACKER_SLEEP_SECONDS and retries, rather
 	  than blocking forever (mirrors the original 'sleep 9 min, try again').
 
+config TRACKER_STATUS_LED
+	bool "RGB status LED (red = no LTE, yellow = LTE only, green = LTE + fix)"
+	default y
+	select LED
+	help
+	  Uses the nPM1300 RGB LED to show connectivity state. Requires all three
+	  LED channels in "host" mode (see the board overlay), which gives up the
+	  PMIC's automatic error/charging indication on LED0/LED1.
+
+if TRACKER_STATUS_LED
+
+config TRACKER_STATUS_LED_RED_INDEX
+	int "nPM1300 LED channel wired to the red element"
+	default 0
+	range 0 2
+
+config TRACKER_STATUS_LED_GREEN_INDEX
+	int "nPM1300 LED channel wired to the green element"
+	default 1
+	range 0 2
+
+config TRACKER_STATUS_LED_BLUE_INDEX
+	int "nPM1300 LED channel wired to the blue element"
+	default 2
+	range 0 2
+	help
+	  Not used by any status color; only forced off at startup.
+
+config TRACKER_STATUS_LED_BLINK_MS
+	int "Blink half-period while charging (milliseconds)"
+	default 500
+	range 50 10000
+	help
+	  The status colour blinks at this rate while the battery is charging and
+	  goes solid once the charge completes (or on battery). Driven from the
+	  system workqueue, since the PMIC LED sinks have no hardware blink.
+
+config TRACKER_STATUS_LED_ON_BATTERY
+	bool "Keep the LED lit while sleeping on battery"
+	help
+	  By default the LED is blanked for the duration of a battery sleep and only
+	  lit while the tracker is awake, since the sink draws ~5 mA. Enable this to
+	  keep the last state visible continuously at the cost of battery life.
+
+endif # TRACKER_STATUS_LED
+
+config TRACKER_FORCE_PUBLISH_WITHOUT_FIX
+	bool "Report even when GNSS never gets a fix (position 0,0)"
+	help
+	  By default a cycle with no GNSS fix is skipped entirely. Enable this to
+	  publish the telemetry anyway with coords [0, 0] and hdop 0, so the backend
+	  still receives battery/signal/awake data (and a heartbeat) from a tracker
+	  that cannot see the sky. Costs data and airtime on every fixless cycle.
+
 config TRACKER_SKIP_LTE
 	bool "Bench debug: skip LTE, run GNSS-only (no SIM needed)"
 	help

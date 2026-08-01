@@ -7,7 +7,9 @@
  *   - push it into the Hologram Data Engine via the Cloud Socket API,
  *   - report every ~60 s while externally powered, otherwise sleep ~9 min,
  *   - wake early from the battery sleep when external power is applied,
- *   - hardware watchdog as a safety reset.
+ *   - hardware watchdog as a safety reset,
+ *   - RGB status LED: red = no LTE, yellow = LTE only, green = LTE + fix,
+ *     blinking while charging.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -22,6 +24,7 @@
 #include "gnss.h"
 #include "hologram.h"
 #include "power.h"
+#include "status_led.h"
 #include "telemetry.h"
 #include "watchdog.h"
 
@@ -85,14 +88,32 @@ static int lte_ensure_connected(void)
 	return 0;
 }
 
-/* Build telemetry from a fix and send it. Returns 0 if the report was sent. */
+/* Refresh the status LED: colour from connectivity, blink while charging. In
+ * GNSS-only bench mode there is no network by design, so treat the LTE side as
+ * satisfied and let the colour track GNSS alone.
+ */
+static void status_led_report(bool have_fix)
+{
+	bool lte = IS_ENABLED(CONFIG_TRACKER_SKIP_LTE) || lte_is_registered();
+
+	status_led_set(!lte	    ? TRACKER_STATUS_NO_LTE :
+		       have_fix	    ? TRACKER_STATUS_LTE_FIX :
+				      TRACKER_STATUS_LTE_NO_FIX);
+	status_led_charging(power_charge_state() == TRACKER_CHARGE_CHARGING);
+}
+
+/* Build telemetry from a fix and send it. Returns 0 if the report was sent.
+ * A NULL @p pvt reports position 0,0 with hdop 0 - used by
+ * TRACKER_FORCE_PUBLISH_WITHOUT_FIX when GNSS never locked but the rest of the
+ * telemetry (battery, signal, awake time) is still worth sending.
+ */
 static int report_fix(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		      uint32_t wake_uptime_ms)
 {
 	struct tracker_telemetry t = {
-		.longitude = pvt->longitude,
-		.latitude = pvt->latitude,
-		.hdop = pvt->hdop,
+		.longitude = pvt ? pvt->longitude : 0.0,
+		.latitude = pvt ? pvt->latitude : 0.0,
+		.hdop = pvt ? pvt->hdop : 0.0f,
 		.awake_s = (uint32_t)((k_uptime_get() - wake_uptime_ms) / 1000),
 	};
 
@@ -144,6 +165,8 @@ int main(void)
 		LOG_WRN("power_init failed; running without charge detection");
 	}
 
+	(void)status_led_init();
+
 	if (gnss_init()) {
 		LOG_ERR("GNSS init failed");
 		return -EIO;
@@ -160,6 +183,8 @@ int main(void)
 		(void)lte_lc_psm_req(true);
 	}
 
+	status_led_report(false);
+
 	while (1) {
 		uint32_t wake_uptime_ms = (uint32_t)k_uptime_get();
 
@@ -171,15 +196,21 @@ int main(void)
 		if (!IS_ENABLED(CONFIG_TRACKER_SKIP_LTE)) {
 			if (lte_ensure_connected() != 0) {
 				LOG_WRN("Network unavailable, sleeping before retry");
+				status_led_set(TRACKER_STATUS_NO_LTE);
+				status_led_sleep();
 				power_wait_interruptible(CONFIG_TRACKER_SLEEP_SECONDS);
 				continue;
 			}
 		}
 
+		/* Registered (or bench mode): yellow until the first fix lands. */
+		status_led_report(false);
+
 		/* Start GNSS and get the first fix of this wake cycle. */
 		struct nrf_modem_gnss_pvt_data_frame pvt;
 
 		if (gnss_start() != 0) {
+			status_led_sleep();
 			power_wait_interruptible(CONFIG_TRACKER_SLEEP_SECONDS);
 			continue;
 		}
@@ -193,8 +224,14 @@ int main(void)
 				(void)gnss_wait_fix(&pvt, 5);
 			}
 			report_fix(&pvt, wake_uptime_ms);
+			status_led_report(true);
+		} else if (IS_ENABLED(CONFIG_TRACKER_FORCE_PUBLISH_WITHOUT_FIX)) {
+			LOG_WRN("No GNSS fix this cycle, reporting position 0,0");
+			report_fix(NULL, wake_uptime_ms);
+			status_led_report(false);
 		} else {
 			LOG_WRN("No GNSS fix this cycle, skipping report");
+			status_led_report(false);
 		}
 		watchdog_feed();
 
@@ -209,8 +246,14 @@ int main(void)
 				watchdog_feed();
 				if (gnss_wait_fix(&pvt, 10) == 0) {
 					report_fix(&pvt, wake_uptime_ms);
+					status_led_report(true);
+				} else if (IS_ENABLED(CONFIG_TRACKER_FORCE_PUBLISH_WITHOUT_FIX)) {
+					LOG_WRN("No GNSS fix, reporting position 0,0");
+					report_fix(NULL, wake_uptime_ms);
+					status_led_report(false);
 				} else {
 					LOG_WRN("No GNSS fix, skipping report");
+					status_led_report(false);
 				}
 			}
 			gnss_stop();
@@ -219,6 +262,7 @@ int main(void)
 			gnss_stop();
 			LOG_INF("On battery, sleeping up to %d s",
 				CONFIG_TRACKER_SLEEP_SECONDS);
+			status_led_sleep();
 			if (power_wait_interruptible(CONFIG_TRACKER_SLEEP_SECONDS)) {
 				LOG_INF("External power applied, waking early");
 			}

@@ -22,3 +22,5 @@ target_sources(app PRIVATE
 	src/hologram.c
 	src/watchdog.c
 )
+
+target_sources_ifdef(CONFIG_TRACKER_STATUS_LED app PRIVATE src/status_led.c)

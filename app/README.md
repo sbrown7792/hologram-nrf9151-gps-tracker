@@ -21,6 +21,45 @@ Engine, the existing REST API and web-app frontend work unchanged.
   original PWR_SENS interrupt.
 - Hardware watchdog resets the SoC if a cycle wedges.
 
+## Status LED
+
+The nPM1300 RGB LED shows connectivity at a glance:
+
+| Colour | Meaning |
+|--------|---------|
+| red | no LTE registration |
+| yellow | LTE registered, no GNSS fix (yet) |
+| green | LTE registered **and** GNSS fix |
+| dark | sleeping on battery |
+
+The pattern carries the charge state on top of that colour:
+
+| Pattern | Meaning |
+|---------|---------|
+| blinking | battery charging (trickle / CC / CV) |
+| solid | charge complete, or running on battery |
+
+Blinking runs on the system workqueue (the PMIC sinks have no hardware blink), so
+it continues through reports and sleeps. The charge state itself is re-sampled at
+cycle boundaries, so a completed charge goes solid within one report interval
+(`TRACKER_CHARGING_INTERVAL_SECONDS`, default 60 s).
+
+The PMIC's LED outputs are on/off current sinks, so yellow is red + green lit
+together. Taking all three channels into `host` mode
+(`boards/circuitdojo_feather_nrf9151_ns.overlay`) gives up the PMIC's automatic
+error/charging indication on LED0/LED1.
+
+To save power the LED is blanked for the duration of a battery sleep and only lit
+while the tracker is awake; while externally powered it stays lit. Options:
+
+```
+CONFIG_TRACKER_STATUS_LED=n              # no LED at all
+CONFIG_TRACKER_STATUS_LED_ON_BATTERY=y   # keep it lit through the battery sleep
+CONFIG_TRACKER_STATUS_LED_BLINK_MS=500   # charging blink half-period
+CONFIG_TRACKER_STATUS_LED_RED_INDEX=0    # swap if the colours come out wrong
+CONFIG_TRACKER_STATUS_LED_GREEN_INDEX=1
+```
+
 ## Configuration
 
 Set at least the Hologram device key (dashboard → device → *Receive from Device*):
@@ -65,6 +104,7 @@ bootloader (`newtmgr`/`mcumgr`, MODE button) or a J-Link/probe-rs.
 | `src/startup.c` | `AT%XANTCFG=1` GNSS antenna hook (nRF9151) |
 | `src/gnss.c` | `nrf_modem_gnss` fix acquisition |
 | `src/power.c` | nPM1300 battery voltage, charge state, VBUS-detect wake |
+| `src/status_led.c` | RGB status LED on the nPM1300 LED sinks |
 | `src/telemetry.c` | Builds the inner JSON payload (+ LiPo battery curve) |
 | `src/hologram.c` | Cloud Socket envelope + TCP send (cJSON) |
 | `src/watchdog.c` | Hardware watchdog safety reset |

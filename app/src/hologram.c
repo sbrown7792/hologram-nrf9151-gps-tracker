@@ -22,8 +22,16 @@
 
 LOG_MODULE_REGISTER(hologram, LOG_LEVEL_INF);
 
-#define ENVELOPE_MAX 512
-#define REPLY_MAX    32
+#define ENVELOPE_MAX	      512
+#define REPLY_MAX	      32
+#define REPLY_TIMEOUT_SECONDS 15
+
+/* A wrong-length key is accepted by the socket and rejected by the server with
+ * "[3,0]" (auth failure), which only shows up on the bench. Catch it here.
+ */
+BUILD_ASSERT(sizeof(CONFIG_HOLOGRAM_DEVICE_KEY) == 9,
+	     "CONFIG_HOLOGRAM_DEVICE_KEY must be exactly 8 characters "
+	     "(Hologram dashboard -> Device -> Receive from Device)");
 
 /* Build {"k":...,"d":...,"t":[...]} + "\n\n" into buf. */
 static int build_envelope(const char *inner_json, char *buf, size_t len)
@@ -92,13 +100,22 @@ static int socket_send_envelope(const char *envelope, size_t envelope_len)
 	}
 
 #if defined(CONFIG_LTE_LC_RAI_MODULE) && defined(SO_RAI)
-	/* Release Assistance: this is the last data we will send. */
-	int rai = RAI_LAST;
+	/* Release Assistance: one uplink, then exactly one response (the ack).
+	 * RAI_LAST would let the modem leave connected mode before the ack lands.
+	 */
+	int rai = RAI_ONE_RESP;
 
 	if (setsockopt(fd, SOL_SOCKET, SO_RAI, &rai, sizeof(rai)) != 0) {
 		LOG_DBG("SO_RAI not applied (err %d)", -errno);
 	}
 #endif
+
+	/* Never block the report loop forever waiting on an ack that may not come. */
+	struct timeval rx_timeout = { .tv_sec = REPLY_TIMEOUT_SECONDS };
+
+	if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rx_timeout, sizeof(rx_timeout)) != 0) {
+		LOG_DBG("SO_RCVTIMEO not applied (err %d)", -errno);
+	}
 
 	ssize_t sent = send(fd, envelope, envelope_len, 0);
 
@@ -115,8 +132,16 @@ static int socket_send_envelope(const char *envelope, size_t envelope_len)
 	if (rx > 0 && strstr(reply, "[0,0]") != NULL) {
 		LOG_INF("Hologram accepted message (%s)", reply);
 		err = 0;
+	} else if (rx > 0) {
+		/* Non-zero first code = rejected: bad key, malformed envelope, etc.
+		 * The TCP send succeeded, so this looks fine from the device side
+		 * but never appears in the Data Engine.
+		 */
+		LOG_ERR("Hologram rejected the message (reply %s)", reply);
+		err = -EIO;
 	} else {
-		LOG_ERR("Hologram send not acknowledged (rx %d: %s)", (int)rx, reply);
+		LOG_ERR("No Hologram ack within %d s (rx %d, err %d)",
+			REPLY_TIMEOUT_SECONDS, (int)rx, -errno);
 		err = -EIO;
 	}
 
@@ -143,6 +168,17 @@ int hologram_send(const char *inner_json)
 			CONFIG_HOLOGRAM_HOST, CONFIG_HOLOGRAM_PORT);
 		LOG_INF("%s", envelope);
 		return 0;
+	}
+
+	/* The Kconfig default authenticates as nobody: Hologram accepts the TCP
+	 * connection, rejects the envelope, and nothing reaches the Data Engine.
+	 * Fail here rather than burning airtime on messages that get dropped.
+	 */
+	if (strcmp(CONFIG_HOLOGRAM_DEVICE_KEY, "CHANGEME") == 0) {
+		LOG_ERR("CONFIG_HOLOGRAM_DEVICE_KEY is still the default; set the "
+			"8-character device key from the Hologram dashboard "
+			"(Device -> Receive from Device)");
+		return -EACCES;
 	}
 
 	return socket_send_envelope(envelope, (size_t)len);

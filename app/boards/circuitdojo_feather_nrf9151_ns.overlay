@@ -1,0 +1,16 @@
+/*
+ * Hand the nPM1300 RGB LED channels to the application.
+ *
+ * The board defaults are LED0 = "error" and LED1 = "charging" (driven by the
+ * PMIC itself); the LED driver refuses led_on()/led_off() (-EPERM) on any
+ * channel that is not in "host" mode. Taking all three lets the tracker show
+ * its own connectivity/fix state instead - see src/status_led.c.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+&npm1300_leds {
+	nordic,led0-mode = "host";
+	nordic,led1-mode = "host";
+	nordic,led2-mode = "host";
+};

@@ -32,6 +32,14 @@ int power_init(void);
 bool power_is_charging(void);
 
 /**
+ * @brief Read just the charge state.
+ *
+ * Cheaper than @ref power_read when the voltage is not needed (status LED).
+ * Falls back to TRACKER_CHARGE_DISCHARGING if the charger cannot be read.
+ */
+enum tracker_charge_state power_charge_state(void);
+
+/**
  * @brief Read battery voltage and charge state.
  *
  * @param batt_mv       Filled with battery voltage in millivolts.

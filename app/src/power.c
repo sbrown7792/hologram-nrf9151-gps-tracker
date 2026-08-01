@@ -108,6 +108,36 @@ bool power_is_charging(void)
 	return vbus_connected;
 }
 
+static enum tracker_charge_state charge_state_from_status(uint32_t status)
+{
+	if (status & CHG_STAT_COMPLETED) {
+		return TRACKER_CHARGE_FULL;
+	}
+
+	if (status & CHG_STAT_CHARGING) {
+		return TRACKER_CHARGE_CHARGING;
+	}
+
+	return TRACKER_CHARGE_DISCHARGING;
+}
+
+enum tracker_charge_state power_charge_state(void)
+{
+	struct sensor_value val;
+
+	if (sensor_sample_fetch(charger) != 0) {
+		return TRACKER_CHARGE_DISCHARGING;
+	}
+
+	if (sensor_channel_get(charger,
+			       (enum sensor_channel)SENSOR_CHAN_NPM13XX_CHARGER_STATUS,
+			       &val) != 0) {
+		return TRACKER_CHARGE_DISCHARGING;
+	}
+
+	return charge_state_from_status(val.val1);
+}
+
 int power_read(uint16_t *batt_mv, enum tracker_charge_state *charge_state)
 {
 	struct sensor_value val;
@@ -135,13 +165,7 @@ int power_read(uint16_t *batt_mv, enum tracker_charge_state *charge_state)
 		return 0;
 	}
 
-	if (val.val1 & CHG_STAT_COMPLETED) {
-		*charge_state = TRACKER_CHARGE_FULL;
-	} else if (val.val1 & CHG_STAT_CHARGING) {
-		*charge_state = TRACKER_CHARGE_CHARGING;
-	} else {
-		*charge_state = TRACKER_CHARGE_DISCHARGING;
-	}
+	*charge_state = charge_state_from_status(val.val1);
 
 	return 0;
 }
