@@ -1,10 +1,15 @@
 # GPS Tracker application configuration.
 # Combines the nfed `gps` (GNSS) and `https` (LTE + sockets + cJSON) sample configs.
+#
+# Template: copy to `prj.conf` and fill in the device key. `prj.conf` is
+# gitignored so the key never lands in version control.
+#
+#     cp app/prj.conf.example app/prj.conf
 
 # REQUIRED: 8-character device key from the Hologram dashboard
 # (Device -> Receive from Device). The "CHANGEME" default is rejected by the
 # Cloud Socket API, so messages never reach the Data Engine.
-CONFIG_HOLOGRAM_DEVICE_KEY="REPLACEME"
+CONFIG_HOLOGRAM_DEVICE_KEY="CHANGEME"
 
 # General / C library
 CONFIG_FPU=y

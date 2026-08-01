@@ -6,6 +6,10 @@ twister-out*/
 # West workspace metadata (created by `west init` in the parent workspace)
 .west/
 
+# Local configuration containing the Hologram device key.
+# Copy app/prj.conf.example -> app/prj.conf and fill in the key.
+app/prj.conf
+
 # Editor / OS cruft
 .vscode/
 *.swp

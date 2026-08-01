@@ -62,7 +62,15 @@ CONFIG_TRACKER_STATUS_LED_GREEN_INDEX=1
 
 ## Configuration
 
-Set at least the Hologram device key (dashboard → device → *Receive from Device*):
+`prj.conf` is not tracked in git (it holds the device key). Start from the
+template:
+
+```
+cp app/prj.conf.example app/prj.conf
+```
+
+Then set at least the Hologram device key (dashboard → device →
+*Receive from Device*):
 
 ```
 CONFIG_HOLOGRAM_DEVICE_KEY="XXXXXXXX"
