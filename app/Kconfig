@@ -2,6 +2,149 @@
 
 mainmenu "GPS Tracker"
 
+choice TRACKER_CLOUD_TRANSPORT
+	prompt "Telemetry transport"
+	default TRACKER_CLOUD_NRF
+	help
+	  Where telemetry reports are published. Both transports send the same
+	  payload from telemetry_build_json(), so the web app's schema is
+	  unchanged either way - only the envelope around it and the backend's
+	  polling endpoint differ.
+
+config TRACKER_CLOUD_NRF
+	bool "nRF Cloud (CoAP over DTLS)"
+	select NRF_CLOUD
+	select NRF_CLOUD_COAP
+	select NRF_CLOUD_CHECK_CREDENTIALS
+	select MODEM_JWT
+	select MODEM_KEY_MGMT
+	select DATE_TIME
+	select NETWORKING
+	select NET_SOCKETS
+	select NET_SOCKETS_OFFLOAD
+	select NET_IPV4
+	help
+	  Requires per-device credentials in the modem key store; see the README
+	  for the one-time provisioning steps. Unlike the Hologram path this also
+	  enables A-GNSS assistance, which is the main reason to prefer it.
+
+config TRACKER_CLOUD_HOLOGRAM
+	bool "Hologram Embedded Cloud Socket (plain TCP)"
+	help
+	  Needs an 8-character Data Engine device key, which Hologram does not
+	  issue for Hyper-provisioned SIMs.
+
+endchoice
+
+config TRACKER_NRF_CLOUD_APP_ID
+	string "appId reported in the nRF Cloud device message envelope"
+	depends on TRACKER_CLOUD_NRF
+	default "GPSTRACKER"
+	help
+	  Deliberately not "GNSS": nRF Cloud's built-in GNSS card expects
+	  {lat,lon,acc,alt,spd,hdg}, which is not this tracker's schema. A custom
+	  appId keeps our payload out of that card and lets the backend filter
+	  /v1/messages by appId.
+
+config TRACKER_NRF_CLOUD_PORTAL_LOCATION
+	bool "Also send position in nRF Cloud's native format"
+	depends on TRACKER_CLOUD_NRF
+	help
+	  Sends a second, standard GNSS message per report so the device shows up
+	  on the nRF Cloud portal's map. Useful when debugging in the field
+	  without the web app, at roughly double the messages and data.
+
+config TRACKER_CLOUD_CONNECT_BUDGET_SECONDS
+	int "Watchdog budget for a cloud connect or resume (seconds)"
+	depends on TRACKER_CLOUD_NRF
+	default 240
+	help
+	  A cold connect is a DTLS handshake (up to 123 s) plus an authentication
+	  exchange, during which the main thread is blocked and cannot feed the
+	  watchdog itself. Must exceed that worst case but stay under the
+	  watchdog timeout.
+
+config TRACKER_MODEM_TIME_WAIT_SECONDS
+	int "Bounded wait for modem network time before the first connect (seconds)"
+	depends on TRACKER_CLOUD_NRF
+	default 60
+	help
+	  The JWT used to authenticate is signed by the modem, which needs network
+	  time. On a cold boot that can lag registration by a few seconds.
+
+config TRACKER_AGNSS
+	bool "Fetch A-GNSS assistance from nRF Cloud"
+	depends on TRACKER_CLOUD_NRF
+	default y
+	select NRF_CLOUD_AGNSS
+	select MODEM_INFO
+	select MODEM_INFO_ADD_NETWORK
+	help
+	  Downloads ephemerides, almanac, time and a coarse position and injects
+	  them into GNSS. Requested proactively when the modem signals it has no
+	  valid assistance (cold start), and as a fallback when a fix attempt
+	  times out. Typically cuts time-to-first-fix from over a minute to a few
+	  seconds, which mostly shows up as battery life.
+
+if TRACKER_AGNSS
+
+config TRACKER_AGNSS_PROACTIVE_WAIT_SECONDS
+	int "How long to wait after GNSS start for an assistance request (seconds)"
+	default 5
+	help
+	  The modem raises its request within a second or two of starting, and
+	  only when it actually lacks data - so this doubles as a cold-start
+	  test. A warm receiver never fires it and the wait costs nothing.
+
+config TRACKER_AGNSS_FIX_TIMEOUT_SECONDS
+	int "Fix window after assistance was injected (seconds)"
+	default 90
+	help
+	  Only used for the retry following a timed-out fix attempt. With valid
+	  assistance a fix normally lands in seconds, so this is mostly a bound
+	  on "the sky is genuinely not visible".
+
+config TRACKER_AGNSS_BUDGET_SECONDS
+	int "Watchdog budget for the assistance download and injection (seconds)"
+	default 180
+
+config TRACKER_AGNSS_MIN_INTERVAL_SECONDS
+	int "Minimum interval between assistance downloads (seconds)"
+	default 1800
+	help
+	  Assistance stays useful for hours, so refetching on every failed cycle
+	  would just burn data. Guards against a covered antenna turning into a
+	  download every nine minutes.
+
+config TRACKER_AGNSS_STOP_GNSS_DURING_FETCH
+	bool "Stop the GNSS receiver while downloading assistance"
+	default y
+	help
+	  In LTE-M/GPS coexistence the modem time-shares one radio, so a searching
+	  receiver slows the download that would have helped it. Injection is
+	  still legal while stopped - it only needs GNSS enabled in the functional
+	  mode, not running.
+
+config TRACKER_AGNSS_FULL_REQUEST_FALLBACK
+	bool "Request the full assistance set if the modem has not asked yet"
+	default y
+	help
+	  nRF Cloud's CoAP API requires an explicit list of what to send, which
+	  normally comes from the modem's own request. This synthesises a
+	  request-everything frame for the case where assistance is wanted before
+	  the modem has asked for any.
+
+endif # TRACKER_AGNSS
+
+config TRACKER_WATCHDOG_MARGIN_SECONDS
+	int "Watchdog margin above TRACKER_SLEEP_SECONDS (seconds)"
+	default 300
+	help
+	  The hardware watchdog keeps counting through the battery sleep, so its
+	  timeout is the sleep plus this margin. The margin must cover the whole
+	  awake portion of a cycle: LTE registration, a cloud connect, both fix
+	  windows and an assistance download.
+
 config HOLOGRAM_DEVICE_KEY
 	string "Hologram device key (8-character 'Receive from Device' key)"
 	default "CHANGEME"

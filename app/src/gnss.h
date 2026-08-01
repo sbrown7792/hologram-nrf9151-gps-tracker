@@ -11,6 +11,9 @@
 #ifndef GPS_TRACKER_GNSS_H_
 #define GPS_TRACKER_GNSS_H_
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include <nrf_modem_gnss.h>
 
 /**
@@ -45,5 +48,31 @@ void gnss_stop(void);
  * @return 0 on success, -EAGAIN on timeout.
  */
 int gnss_wait_fix(struct nrf_modem_gnss_pvt_data_frame *out, uint32_t timeout_s);
+
+/**
+ * @brief Fetch the assistance data GNSS last asked for.
+ *
+ * Populated from NRF_MODEM_GNSS_EVT_AGNSS_REQ. The frame is sticky: it reflects
+ * the most recent request rather than being a one-shot queue, because the modem
+ * re-raises the event whenever it still needs data.
+ *
+ * @param out  Filled on success.
+ * @return true if GNSS has requested assistance since boot, false otherwise.
+ */
+bool gnss_agnss_request_get(struct nrf_modem_gnss_agnss_data_frame *out);
+
+/**
+ * @brief Block until GNSS asks for assistance, or timeout.
+ *
+ * The modem raises the request shortly after gnss_start() only when it lacks
+ * valid assistance data, which makes this a reliable cold-start test: a warm
+ * receiver simply never fires it. Only requests raised since the most recent
+ * gnss_start() are counted.
+ *
+ * @param out        Filled with the requested data set on success.
+ * @param timeout_s  Maximum time to wait, seconds.
+ * @return 0 if assistance was requested, -EAGAIN on timeout.
+ */
+int gnss_agnss_request_wait(struct nrf_modem_gnss_agnss_data_frame *out, uint32_t timeout_s);
 
 #endif /* GPS_TRACKER_GNSS_H_ */

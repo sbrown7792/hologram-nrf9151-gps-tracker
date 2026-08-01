@@ -21,8 +21,9 @@
 #include <modem/modem_info.h>
 #include <modem/nrf_modem_lib.h>
 
+#include "agnss.h"
+#include "cloud.h"
 #include "gnss.h"
-#include "hologram.h"
 #include "power.h"
 #include "status_led.h"
 #include "telemetry.h"
@@ -133,14 +134,62 @@ static int report_fix(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 		return -ENOMEM;
 	}
 
-	int err = hologram_send(payload);
+	int err = cloud_send_telemetry(payload);
+
+	if (err == -EACCES || err == -ENOTCONN) {
+		/* The session can age out server-side while we sleep. Re-establish
+		 * once and retry before writing the cycle off.
+		 */
+		LOG_INF("Cloud link stale, reconnecting for this report");
+		watchdog_guard_start(CONFIG_TRACKER_CLOUD_CONNECT_BUDGET_SECONDS);
+		err = cloud_resume();
+		watchdog_guard_stop();
+
+		if (!err) {
+			err = cloud_send_telemetry(payload);
+		}
+	}
 
 	if (err) {
-		LOG_ERR("Hologram send failed (err %d)", err);
+		LOG_ERR("Telemetry send failed (err %d)", err);
+	} else if (pvt != NULL) {
+		/* Optional, off by default: makes the fix visible on the cloud
+		 * provider's own map view. Never sent for a synthesised 0,0.
+		 */
+		(void)cloud_send_location(pvt);
 	}
 
 	watchdog_feed();
 	return err;
+}
+
+/* Pull assistance data down and hand it to the modem. Returns true if GNSS now
+ * has fresh assistance.
+ *
+ * The receiver is stopped for the duration by default: in LTE-M/GPS coexistence
+ * a searching receiver competes with the download for the radio, and it has
+ * already proved it cannot see enough sky. Injection is legal while stopped,
+ * since it only needs GNSS enabled in the functional mode.
+ */
+static bool try_assistance(void)
+{
+	bool stopped = IS_ENABLED(CONFIG_TRACKER_AGNSS_STOP_GNSS_DURING_FETCH);
+	int err;
+
+	if (stopped) {
+		gnss_stop();
+	}
+
+	watchdog_guard_start(CONFIG_TRACKER_AGNSS_BUDGET_SECONDS);
+	err = agnss_fetch_and_inject();
+	watchdog_guard_stop();
+
+	if (stopped && gnss_start() != 0) {
+		LOG_ERR("Failed to restart GNSS after the assistance fetch");
+		return false;
+	}
+
+	return err == 0;
 }
 
 int main(void)
@@ -183,6 +232,13 @@ int main(void)
 		(void)lte_lc_psm_req(true);
 	}
 
+	/* Last: needs the modem library up, but no network. Reports a missing
+	 * credential at boot rather than after the first failed connect.
+	 */
+	if (cloud_init()) {
+		LOG_ERR("Cloud transport init failed; reports will not be sent");
+	}
+
 	status_led_report(false);
 
 	while (1) {
@@ -203,19 +259,63 @@ int main(void)
 			}
 		}
 
+		/* Bring the cloud link up before GNSS starts: in LTE-M/GPS
+		 * coexistence the modem time-shares the radio, so the handshake is
+		 * quickest with the receiver off. It also leaves the session warm
+		 * in case the fix attempt below needs assistance data. A failure
+		 * here is not fatal - we still try for a fix and retry the link
+		 * when the report is actually sent.
+		 */
+		watchdog_guard_start(CONFIG_TRACKER_CLOUD_CONNECT_BUDGET_SECONDS);
+		(void)cloud_resume();
+		watchdog_guard_stop();
+
 		/* Registered (or bench mode): yellow until the first fix lands. */
 		status_led_report(false);
 
 		/* Start GNSS and get the first fix of this wake cycle. */
 		struct nrf_modem_gnss_pvt_data_frame pvt;
+		struct nrf_modem_gnss_agnss_data_frame agnss_req;
+		bool assisted = false;
 
 		if (gnss_start() != 0) {
+			cloud_pause();
 			status_led_sleep();
 			power_wait_interruptible(CONFIG_TRACKER_SLEEP_SECONDS);
 			continue;
 		}
 
-		if (gnss_wait_fix(&pvt, CONFIG_TRACKER_GNSS_FIX_TIMEOUT_SECONDS) == 0) {
+		/* The modem asks for assistance within a second or two of starting,
+		 * but only when it actually lacks valid data - so this is a reliable
+		 * cold-start test that costs nothing on a warm receiver.
+		 */
+		if (IS_ENABLED(CONFIG_TRACKER_AGNSS) && !IS_ENABLED(CONFIG_TRACKER_SKIP_LTE) &&
+		    cloud_is_ready() &&
+		    gnss_agnss_request_wait(&agnss_req,
+					    CONFIG_TRACKER_AGNSS_PROACTIVE_WAIT_SECONDS) == 0) {
+			LOG_INF("Cold start: fetching A-GNSS assistance up front");
+			assisted = try_assistance();
+		}
+
+		bool have_fix = gnss_wait_fix(&pvt,
+					      CONFIG_TRACKER_GNSS_FIX_TIMEOUT_SECONDS) == 0;
+
+		/* Nothing after the full window. If we have not already pulled
+		 * assistance this cycle, it is worth a shot before giving up.
+		 */
+		if (!have_fix && !assisted && IS_ENABLED(CONFIG_TRACKER_AGNSS) &&
+		    !IS_ENABLED(CONFIG_TRACKER_SKIP_LTE) && cloud_is_ready()) {
+			LOG_WRN("No fix after %d s, falling back to A-GNSS assistance",
+				CONFIG_TRACKER_GNSS_FIX_TIMEOUT_SECONDS);
+
+			if (try_assistance()) {
+				have_fix = gnss_wait_fix(
+					&pvt, CONFIG_TRACKER_AGNSS_FIX_TIMEOUT_SECONDS) == 0;
+			}
+		}
+		watchdog_feed();
+
+		if (have_fix) {
 			/* Let the fix settle briefly for a better position, then
 			 * grab the improved one (original waited ~5 s).
 			 */
@@ -257,9 +357,14 @@ int main(void)
 				}
 			}
 			gnss_stop();
+			cloud_pause();
 		} else {
 			/* On battery: stop GNSS and sleep, waking early on external power. */
 			gnss_stop();
+			/* Keep the session state so the next cycle can resume without
+			 * paying for another handshake.
+			 */
+			cloud_pause();
 			LOG_INF("On battery, sleeping up to %d s",
 				CONFIG_TRACKER_SLEEP_SECONDS);
 			status_led_sleep();

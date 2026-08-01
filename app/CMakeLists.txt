@@ -2,9 +2,8 @@
 # GPS Tracker for CircuitDojo nRF9151 Feather
 #
 # Port of the original Hologram Dash Arduino sketch (../gps_tracker/gps_tracker.ino)
-# to nRF Connect SDK / Zephyr. Sends GPS + telemetry as a JSON string into the
-# Hologram Data Engine via the Embedded Cloud Socket API, preserving the existing
-# REST-API/web-app backend contract.
+# to nRF Connect SDK / Zephyr. Sends GPS + telemetry as a JSON string to nRF Cloud
+# (or the Hologram Data Engine), preserving the existing web-app payload schema.
 #
 # SPDX-License-Identifier: Apache-2.0
 
@@ -19,8 +18,15 @@ target_sources(app PRIVATE
 	src/gnss.c
 	src/power.c
 	src/telemetry.c
-	src/hologram.c
 	src/watchdog.c
 )
 
+# Exactly one transport is compiled in, so main.c never needs a #if.
+target_sources_ifdef(CONFIG_TRACKER_CLOUD_NRF app PRIVATE src/cloud_nrf.c)
+target_sources_ifdef(CONFIG_TRACKER_CLOUD_HOLOGRAM app PRIVATE
+	src/cloud_hologram.c
+	src/hologram.c
+)
+
+target_sources_ifdef(CONFIG_TRACKER_AGNSS app PRIVATE src/agnss.c)
 target_sources_ifdef(CONFIG_TRACKER_STATUS_LED app PRIVATE src/status_led.c)
