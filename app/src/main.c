@@ -163,35 +163,6 @@ static int report_fix(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 	return err;
 }
 
-/* Pull assistance data down and hand it to the modem. Returns true if GNSS now
- * has fresh assistance.
- *
- * The receiver is stopped for the duration by default: in LTE-M/GPS coexistence
- * a searching receiver competes with the download for the radio, and it has
- * already proved it cannot see enough sky. Injection is legal while stopped,
- * since it only needs GNSS enabled in the functional mode.
- */
-static bool try_assistance(void)
-{
-	bool stopped = IS_ENABLED(CONFIG_TRACKER_AGNSS_STOP_GNSS_DURING_FETCH);
-	int err;
-
-	if (stopped) {
-		gnss_stop();
-	}
-
-	watchdog_guard_start(CONFIG_TRACKER_AGNSS_BUDGET_SECONDS);
-	err = agnss_fetch_and_inject();
-	watchdog_guard_stop();
-
-	if (stopped && gnss_start() != 0) {
-		LOG_ERR("Failed to restart GNSS after the assistance fetch");
-		return false;
-	}
-
-	return err == 0;
-}
-
 int main(void)
 {
 	int err;
@@ -275,7 +246,6 @@ int main(void)
 
 		/* Start GNSS and get the first fix of this wake cycle. */
 		struct nrf_modem_gnss_pvt_data_frame pvt;
-		struct nrf_modem_gnss_agnss_data_frame agnss_req;
 		bool assisted = false;
 
 		if (gnss_start() != 0) {
@@ -291,10 +261,9 @@ int main(void)
 		 */
 		if (IS_ENABLED(CONFIG_TRACKER_AGNSS) && !IS_ENABLED(CONFIG_TRACKER_SKIP_LTE) &&
 		    cloud_is_ready() &&
-		    gnss_agnss_request_wait(&agnss_req,
-					    CONFIG_TRACKER_AGNSS_PROACTIVE_WAIT_SECONDS) == 0) {
+		    gnss_agnss_request_wait(CONFIG_TRACKER_AGNSS_PROACTIVE_WAIT_SECONDS) == 0) {
 			LOG_INF("Cold start: fetching A-GNSS assistance up front");
-			assisted = try_assistance();
+			assisted = agnss_fetch_and_inject() == 0;
 		}
 
 		bool have_fix = gnss_wait_fix(&pvt,
@@ -308,7 +277,7 @@ int main(void)
 			LOG_WRN("No fix after %d s, falling back to A-GNSS assistance",
 				CONFIG_TRACKER_GNSS_FIX_TIMEOUT_SECONDS);
 
-			if (try_assistance()) {
+			if (agnss_fetch_and_inject() == 0) {
 				have_fix = gnss_wait_fix(
 					&pvt, CONFIG_TRACKER_AGNSS_FIX_TIMEOUT_SECONDS) == 0;
 			}

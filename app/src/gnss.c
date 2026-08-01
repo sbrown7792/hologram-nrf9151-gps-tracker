@@ -183,11 +183,7 @@ bool gnss_agnss_request_get(struct nrf_modem_gnss_agnss_data_frame *out)
 	return valid;
 }
 
-int gnss_agnss_request_wait(struct nrf_modem_gnss_agnss_data_frame *out, uint32_t timeout_s)
+int gnss_agnss_request_wait(uint32_t timeout_s)
 {
-	if (k_sem_take(&agnss_req_sem, K_SECONDS(timeout_s)) != 0) {
-		return -EAGAIN;
-	}
-
-	return gnss_agnss_request_get(out) ? 0 : -EAGAIN;
+	return k_sem_take(&agnss_req_sem, K_SECONDS(timeout_s)) == 0 ? 0 : -EAGAIN;
 }

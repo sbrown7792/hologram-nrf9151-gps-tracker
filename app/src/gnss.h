@@ -69,10 +69,11 @@ bool gnss_agnss_request_get(struct nrf_modem_gnss_agnss_data_frame *out);
  * receiver simply never fires it. Only requests raised since the most recent
  * gnss_start() are counted.
  *
- * @param out        Filled with the requested data set on success.
+ * Retrieve what was asked for with gnss_agnss_request_get().
+ *
  * @param timeout_s  Maximum time to wait, seconds.
  * @return 0 if assistance was requested, -EAGAIN on timeout.
  */
-int gnss_agnss_request_wait(struct nrf_modem_gnss_agnss_data_frame *out, uint32_t timeout_s);
+int gnss_agnss_request_wait(uint32_t timeout_s);
 
 #endif /* GPS_TRACKER_GNSS_H_ */

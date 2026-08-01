@@ -31,6 +31,7 @@
 #include <string.h>
 
 #include "gnss.h"
+#include "watchdog.h"
 
 LOG_MODULE_REGISTER(agnss, LOG_LEVEL_INF);
 
@@ -98,22 +99,36 @@ static void synthesize_request(struct nrf_modem_gnss_agnss_data_frame *req)
 	req->system[0].sv_mask_alm = 0xFFFFFFFFU;
 }
 
-int agnss_fetch_and_inject(void)
+/* Assistance stays useful for hours, so refetching on every failed cycle would
+ * just burn data - a covered antenna would otherwise mean a download every wake.
+ */
+static bool rate_limited(void)
+{
+	int64_t age_s;
+
+	if (last_fetch_uptime_ms == 0) {
+		return false;
+	}
+
+	age_s = (k_uptime_get() - last_fetch_uptime_ms) / 1000;
+	if (age_s >= CONFIG_TRACKER_AGNSS_MIN_INTERVAL_SECONDS) {
+		return false;
+	}
+
+	LOG_INF("A-GNSS fetched %lld s ago, skipping (min interval %d s)", age_s,
+		CONFIG_TRACKER_AGNSS_MIN_INTERVAL_SECONDS);
+	return true;
+}
+
+/* Everything from the request build to the modem injection. Split out so the
+ * receiver handling and watchdog guard below wrap it exactly once.
+ */
+static int fetch_and_inject(void)
 {
 	struct nrf_modem_gnss_agnss_data_frame req;
 	struct lte_lc_cells_info net_info = { 0 };
 	bool have_cell_info;
 	int err;
-
-	if (last_fetch_uptime_ms != 0) {
-		int64_t age_s = (k_uptime_get() - last_fetch_uptime_ms) / 1000;
-
-		if (age_s < CONFIG_TRACKER_AGNSS_MIN_INTERVAL_SECONDS) {
-			LOG_INF("A-GNSS fetched %lld s ago, skipping (min interval %d s)",
-				age_s, CONFIG_TRACKER_AGNSS_MIN_INTERVAL_SECONDS);
-			return -EAGAIN;
-		}
-	}
 
 	if (!gnss_agnss_request_get(&req)) {
 		if (!IS_ENABLED(CONFIG_TRACKER_AGNSS_FULL_REQUEST_FALLBACK)) {
@@ -179,4 +194,41 @@ int agnss_fetch_and_inject(void)
 	LOG_INF("A-GNSS data processed");
 
 	return 0;
+}
+
+int agnss_fetch_and_inject(void)
+{
+	bool stopped = IS_ENABLED(CONFIG_TRACKER_AGNSS_STOP_GNSS_DURING_FETCH);
+	int err;
+
+	/* Before touching the receiver: stopping and restarting it discards
+	 * whatever acquisition progress it has made, which is a bad trade for a
+	 * call that is only going to decline.
+	 */
+	if (rate_limited()) {
+		return -EAGAIN;
+	}
+
+	/* In LTE-M/GPS coexistence the modem time-shares one radio, so a
+	 * searching receiver slows down the very download meant to help it.
+	 * Stopping is safe: injection needs GNSS enabled in the functional mode,
+	 * not running.
+	 */
+	if (stopped) {
+		gnss_stop();
+	}
+
+	/* The main thread blocks inside the CoAP exchange and cannot feed the
+	 * watchdog itself, so hand that job to the guard for a bounded window.
+	 */
+	watchdog_guard_start(CONFIG_TRACKER_AGNSS_BUDGET_SECONDS);
+	err = fetch_and_inject();
+	watchdog_guard_stop();
+
+	if (stopped && gnss_start() != 0) {
+		LOG_ERR("Failed to restart GNSS after the assistance fetch");
+		return -EIO;
+	}
+
+	return err;
 }

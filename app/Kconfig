@@ -56,7 +56,6 @@ config TRACKER_NRF_CLOUD_PORTAL_LOCATION
 
 config TRACKER_CLOUD_CONNECT_BUDGET_SECONDS
 	int "Watchdog budget for a cloud connect or resume (seconds)"
-	depends on TRACKER_CLOUD_NRF
 	default 240
 	help
 	  A cold connect is a DTLS handshake (up to 123 s) plus an authentication
@@ -86,7 +85,9 @@ config TRACKER_AGNSS
 	  times out. Typically cuts time-to-first-fix from over a minute to a few
 	  seconds, which mostly shows up as battery life.
 
-if TRACKER_AGNSS
+# These two shape the main report loop rather than the assistance module, so
+# they stay defined even when TRACKER_AGNSS is off - main.c references them
+# unconditionally and lets the compiler drop the dead branches.
 
 config TRACKER_AGNSS_PROACTIVE_WAIT_SECONDS
 	int "How long to wait after GNSS start for an assistance request (seconds)"
@@ -95,6 +96,7 @@ config TRACKER_AGNSS_PROACTIVE_WAIT_SECONDS
 	  The modem raises its request within a second or two of starting, and
 	  only when it actually lacks data - so this doubles as a cold-start
 	  test. A warm receiver never fires it and the wait costs nothing.
+	  Ignored unless TRACKER_AGNSS is enabled.
 
 config TRACKER_AGNSS_FIX_TIMEOUT_SECONDS
 	int "Fix window after assistance was injected (seconds)"
@@ -102,7 +104,10 @@ config TRACKER_AGNSS_FIX_TIMEOUT_SECONDS
 	help
 	  Only used for the retry following a timed-out fix attempt. With valid
 	  assistance a fix normally lands in seconds, so this is mostly a bound
-	  on "the sky is genuinely not visible".
+	  on "the sky is genuinely not visible". Ignored unless TRACKER_AGNSS is
+	  enabled.
+
+if TRACKER_AGNSS
 
 config TRACKER_AGNSS_BUDGET_SECONDS
 	int "Watchdog budget for the assistance download and injection (seconds)"
