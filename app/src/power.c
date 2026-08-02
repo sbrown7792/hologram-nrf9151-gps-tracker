@@ -101,7 +101,7 @@ int power_init(void)
 	return 0;
 }
 
-bool power_is_charging(void)
+bool power_vbus_present(void)
 {
 	/* Refresh from hardware in case an edge was missed. */
 	vbus_connected = read_vbus_present();

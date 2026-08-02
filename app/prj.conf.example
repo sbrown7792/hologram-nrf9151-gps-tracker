@@ -125,6 +125,12 @@ CONFIG_NRF_CLOUD_GPS_LOG_LEVEL_INF=y
 # Log the composed message instead of sending it
 #CONFIG_TRACKER_OFFLINE_DEBUG=y
 
+# --- Board identity reported in the telemetry "hw" field ---------------
+# Paired with "fw", the UTC build time, which is stamped in automatically.
+# Nothing uses these yet; they are there so a future firmware or board revision
+# can be told apart in the archive without guessing from dates.
+CONFIG_TRACKER_HW_REVISION="feather-nrf9151"
+
 # --- Always report, even with no GNSS fix (coords are sent as [0, 0]) ---
 CONFIG_TRACKER_FORCE_PUBLISH_WITHOUT_FIX=y
 

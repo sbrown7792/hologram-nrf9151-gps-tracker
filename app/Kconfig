@@ -159,6 +159,19 @@ config TRACKER_AGNSS_FULL_REQUEST_FALLBACK
 
 endif # TRACKER_AGNSS
 
+config TRACKER_HW_REVISION
+	string "Hardware revision reported in the telemetry \"hw\" field"
+	default "feather-nrf9151"
+	help
+	  Identifies the board this firmware is running on, since nothing in the
+	  image can work that out at runtime. Paired with the "fw" field, which
+	  is the UTC build time stamped in by cmake/build_stamp.cmake, this lets
+	  the backend tell later which combination produced a record - the field
+	  the Dash-era data never had and had to be inferred from dates.
+
+	  Sent verbatim on every report, so keep it short: telemetry_build_json()
+	  is bounded at 256 bytes and a long string here eats that budget.
+
 config TRACKER_WATCHDOG_MARGIN_SECONDS
 	int "Watchdog margin above TRACKER_SLEEP_SECONDS (seconds)"
 	default 300

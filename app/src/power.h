@@ -27,9 +27,14 @@ int power_init(void);
  * @brief Is external power (VBUS) currently present?
  *
  * Used to decide between the frequent "charging" report loop and the long
- * battery sleep, replacing the original getChargeState() plugged-in check.
+ * battery sleep, replacing the original getChargeState() plugged-in check, and
+ * reported as the telemetry "vbus" field.
+ *
+ * Deliberately not named power_is_charging(): this is the supply, not the
+ * charger. A full battery on a live USB lead is VBUS present with a charge
+ * state of TRACKER_CHARGE_DISCHARGING, and the two must not be conflated.
  */
-bool power_is_charging(void);
+bool power_vbus_present(void);
 
 /**
  * @brief Read just the charge state.

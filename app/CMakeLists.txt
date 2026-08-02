@@ -35,3 +35,24 @@ target_sources_ifdef(CONFIG_TRACKER_GNSS_EXTERNAL app PRIVATE src/gnss_ext.c)
 
 target_sources_ifdef(CONFIG_TRACKER_AGNSS app PRIVATE src/agnss.c)
 target_sources_ifdef(CONFIG_TRACKER_STATUS_LED app PRIVATE src/status_led.c)
+
+# Firmware build stamp for the telemetry "fw" field. Regenerated on every build
+# rather than at configure time, so it cannot go stale; the script rewrites the
+# header only when the minute has rolled over, so this does not force a rebuild
+# of telemetry.c every time.
+set(tracker_generated_dir ${CMAKE_CURRENT_BINARY_DIR}/include/generated)
+set(tracker_build_stamp_h ${tracker_generated_dir}/tracker_build_stamp.h)
+
+file(MAKE_DIRECTORY ${tracker_generated_dir})
+
+add_custom_target(tracker_build_stamp ALL
+	COMMAND ${CMAKE_COMMAND}
+		-DOUTPUT_FILE=${tracker_build_stamp_h}
+		-P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_stamp.cmake
+	BYPRODUCTS ${tracker_build_stamp_h}
+	COMMENT "Stamping firmware build date"
+	VERBATIM
+)
+
+add_dependencies(app tracker_build_stamp)
+target_include_directories(app PRIVATE ${tracker_generated_dir})

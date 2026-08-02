@@ -128,9 +128,14 @@ static int report_fix(const struct tracker_fix *fix, uint32_t wake_uptime_ms)
 		.latitude = fix ? fix->latitude : 0.0,
 		.hdop = fix ? fix->hdop : 0.0f,
 		.awake_s = (uint32_t)((k_uptime_get() - wake_uptime_ms) / 1000),
+		.vbus = power_vbus_present(),
 	};
 
 	if (power_read(&t.batt_mv, &t.charge)) {
+		/* batt_mv 0 with charge 0 is the "PMIC unreadable" signature, not a
+		 * flat battery on no charger - the two are worth telling apart at
+		 * the far end.
+		 */
 		t.batt_mv = 0;
 		t.charge = TRACKER_CHARGE_DISCHARGING;
 	}
@@ -337,13 +342,13 @@ int main(void)
 		}
 		watchdog_feed();
 
-		if (power_is_charging()) {
+		if (power_vbus_present()) {
 			/* Externally powered: keep GNSS running (stays locked) so
 			 * each subsequent fix is near-instant.
 			 */
 			LOG_INF("Externally powered, reporting every %d s (GNSS kept on)",
 				CONFIG_TRACKER_CHARGING_INTERVAL_SECONDS);
-			while (power_is_charging()) {
+			while (power_vbus_present()) {
 				k_sleep(K_SECONDS(CONFIG_TRACKER_CHARGING_INTERVAL_SECONDS));
 				watchdog_feed();
 				if (gnss_wait_fix(&fix, 10) == 0) {
@@ -358,21 +363,26 @@ int main(void)
 					status_led_report(false);
 				}
 			}
-			gnss_stop();
-			cloud_pause();
-		} else {
-			/* On battery: stop GNSS and sleep, waking early on external power. */
-			gnss_stop();
-			/* Keep the session state so the next cycle can resume without
-			 * paying for another handshake.
+
+			/* External power just went away. Fall through to the sleep
+			 * below rather than looping straight into another cycle: the
+			 * tracker is on battery from this moment, and an immediate
+			 * re-acquire would cost a full fix window (up to the external
+			 * timeout plus the modem fallback) with nothing to show for it.
 			 */
-			cloud_pause();
-			LOG_INF("On battery, sleeping up to %d s",
-				CONFIG_TRACKER_SLEEP_SECONDS);
-			status_led_sleep();
-			if (power_wait_interruptible(CONFIG_TRACKER_SLEEP_SECONDS)) {
-				LOG_INF("External power applied, waking early");
-			}
+			LOG_INF("External power removed, back to battery reporting");
+		}
+
+		/* On battery: stop GNSS and sleep, waking early on external power. */
+		gnss_stop();
+		/* Keep the session state so the next cycle can resume without paying
+		 * for another handshake.
+		 */
+		cloud_pause();
+		LOG_INF("On battery, sleeping up to %d s", CONFIG_TRACKER_SLEEP_SECONDS);
+		status_led_sleep();
+		if (power_wait_interruptible(CONFIG_TRACKER_SLEEP_SECONDS)) {
+			LOG_INF("External power applied, waking early");
 		}
 	}
 

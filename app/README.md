@@ -22,7 +22,8 @@ default because it is the only one that can serve
 - Acquire a GNSS fix from the [external module](#gnss-sources), falling back to the
   onboard receiver — with [A-GNSS assistance](#a-gnss-assistance) — if it does not lock.
   A short settle window after the first fix improves accuracy.
-- Send `{"coords":[lon,lat],"hdop":H,"batt":%,"volt":mV,"charge":C,"signal":S,"awake":s}`.
+- Send `{"coords":[lon,lat],"hdop":H,"batt":%,"volt":mV,"charge":C,"signal":S,"awake":s,`
+  `"vbus":bool,"fw":"x.y.z","hw":"rev"}` — see [Telemetry payload](#telemetry-payload).
 - While externally powered (VBUS present): report every
   `TRACKER_CHARGING_INTERVAL_SECONDS` (default 60 s).
 - On battery: LTE PSM + `k_sleep(TRACKER_SLEEP_SECONDS)` (default ~9 min). Applying
@@ -239,6 +240,56 @@ pipx install nrfcloud-utils         # verified against 3.3.0
 
 Flag names drift between nrfcloud-utils releases; check `--help` if yours is not 3.3.x.
 
+## Telemetry payload
+
+Built by `telemetry_build_json()` and identical on both providers. New fields are
+appended, never inserted, so the leading part of an old record and a new one stay
+directly comparable.
+
+```json
+{"coords": [-71.149272, 41.744192], "hdop": 0.98, "batt": 90, "volt": 4062,
+ "charge": 0, "signal": -92, "awake": 148, "vbus": false,
+ "fw": "2026-08-02T17:51Z", "hw": "feather-nrf9151"}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `coords` | `[longitude, latitude]`, degrees. `[0, 0]` when no fix (see `TRACKER_FORCE_PUBLISH_WITHOUT_FIX`) |
+| `hdop` | Horizontal dilution of precision. `0` alongside `[0, 0]` |
+| `batt` | Percent, interpolated from `volt` on a generic LiPo curve |
+| `volt` | Battery millivolts. `0` means the PMIC could not be read |
+| `charge` | Charger activity: `0` discharging, `1` charging, `2` complete |
+| `signal` | RSRP in dBm (negative). `0` when there is no valid reading |
+| `awake` | Seconds since the start of this wake cycle |
+| `vbus` | External power present |
+| `fw` | UTC build time of the firmware, `YYYY-MM-DDThh:mmZ` |
+| `hw` | Board, from `CONFIG_TRACKER_HW_REVISION` |
+
+Three things a reader needs to know:
+
+- **`charge` is not the same as `vbus`.** `charge` reports only what the charger is
+  doing. A full battery on a live USB lead is `vbus: true, charge: 0`. Infer "plugged
+  in" from `vbus`, never from `charge`.
+- **`charge: 0, volt: 0` means the PMIC read failed**, not a flat battery. Worth
+  displaying as unknown rather than plotting a zero.
+- **`charge` is not Dash-compatible.** The Konekt Dash sent its `charge_status`
+  enum — `2` charging, `4` charged, `7` on battery, `0` *fault* — which collides with
+  this one on every shared value. Records without an `fw` field are Dash-era and must
+  be decoded with the old table. That is what `fw`/`hw` exist to disambiguate.
+
+`fw` needs no maintenance: [`cmake/build_stamp.cmake`](cmake/build_stamp.cmake) stamps
+the UTC build time into a generated header on every build, so it can never be a
+version someone forgot to bump. The header is rewritten only when the minute has
+rolled over, so back-to-back builds do not churn `telemetry.c`. Two consequences worth
+knowing: the string sorts chronologically as plain text, and builds are not
+byte-reproducible across minutes.
+
+Set the board string with `CONFIG_TRACKER_HW_REVISION` in `prj.conf`.
+
+Separately, [`VERSION`](VERSION) carries a semantic version that Zephyr turns into the
+**MCUboot image version**. It does not appear in telemetry, but MCUboot uses it to
+order images, so bump it when you cut a release you intend to deploy over DFU.
+
 ## Backend contract
 
 Reports arrive as nRF Cloud device messages with the tracker payload as the `data`
@@ -247,11 +298,12 @@ member:
 ```json
 {"appId":"GPSTRACKER","messageType":"DATA","ts":1754035200000,
  "data":{"coords": [151.2, -33.8], "hdop": 1.20, "batt": 87, "volt": 4010,
-         "charge": 0, "signal": -85, "awake": 43}}
+         "charge": 0, "signal": -85, "awake": 43, "vbus": false,
+         "fw": "1.0.0", "hw": "feather-nrf9151"}}
 ```
 
 The web app polls nRF Cloud instead of the Hologram Data Engine and reads
-`item.message.data`, which is byte-for-byte what the Dash used to send:
+`item.message.data`:
 
 ```
 GET https://api.nrfcloud.com/v1/messages?deviceId=<id>&appId=GPSTRACKER&start=<ISO8601>&pageSort=desc
@@ -261,6 +313,19 @@ Authorization: Bearer <nRF Cloud API key>
 The nRF Cloud device ID replaces the Hologram device key as the correlation key. Note
 that nRF Cloud retains messages for about 30 days, so the backend must store history
 itself rather than treating the cloud as the archive.
+
+On the **Hologram** provider the record shape is different again. `/api/1/csr/rdm/`
+returns each record's `data` as an escaped JSON *string*, whose own `data` member is
+**base64** of the raw payload — three steps to get at the telemetry:
+
+```
+record["data"] -> JSON.parse -> ["data"] -> base64 decode -> JSON.parse
+```
+
+The `_JSONSTRING_` tag on the record is Hologram confirming the decoded bytes parse as
+JSON. Sort and filter on `received`, not `logged`: `received` is when the socket server
+took the message, `logged` is when the record was indexed, and indexing happens in
+batches — messages that arrived a minute apart routinely share one `logged` value.
 
 ## Build
 
