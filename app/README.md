@@ -149,6 +149,13 @@ help it.
 
 ## Cloud provider
 
+`prj.conf` is not tracked in git (it holds the Hologram device key). Start from the
+template:
+
+```
+cp app/prj.conf.example app/prj.conf
+```
+
 One line of `prj.conf` switches providers. Nothing else needs touching — no conf
 fragments, no build flags, no branch:
 
