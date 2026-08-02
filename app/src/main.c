@@ -2,9 +2,10 @@
  * GPS Tracker for the CircuitDojo nRF9151 Feather.
  *
  * Port of the original Hologram Dash sketch (../gps_tracker/gps_tracker.ino):
- *   - acquire a GNSS fix,
+ *   - acquire a GNSS fix, from an external NMEA module where one is fitted and
+ *     otherwise (or on fallback) from the modem's own receiver,
  *   - build the same telemetry JSON the web app expects,
- *   - push it into the Hologram Data Engine via the Cloud Socket API,
+ *   - push it to the configured cloud provider (see cloud.h),
  *   - report every ~60 s while externally powered, otherwise sleep ~9 min,
  *   - wake early from the battery sleep when external power is applied,
  *   - hardware watchdog as a safety reset,
@@ -89,6 +90,18 @@ static int lte_ensure_connected(void)
 	return 0;
 }
 
+/* Whether an A-GNSS fetch is worth attempting right now. Assistance is injected
+ * into the modem, so it is only useful while the onboard receiver is the one
+ * running - and only nRF Cloud can serve it, so a "hologram" build never gets
+ * past this even with CONFIG_TRACKER_AGNSS compiled in.
+ */
+static bool agnss_wanted(void)
+{
+	return IS_ENABLED(CONFIG_TRACKER_AGNSS) && !IS_ENABLED(CONFIG_TRACKER_SKIP_LTE) &&
+	       gnss_active_source() == TRACKER_FIX_SOURCE_MODEM && cloud_supports_agnss() &&
+	       cloud_is_ready();
+}
+
 /* Refresh the status LED: colour from connectivity, blink while charging. In
  * GNSS-only bench mode there is no network by design, so treat the LTE side as
  * satisfied and let the colour track GNSS alone.
@@ -104,17 +117,16 @@ static void status_led_report(bool have_fix)
 }
 
 /* Build telemetry from a fix and send it. Returns 0 if the report was sent.
- * A NULL @p pvt reports position 0,0 with hdop 0 - used by
+ * A NULL @p fix reports position 0,0 with hdop 0 - used by
  * TRACKER_FORCE_PUBLISH_WITHOUT_FIX when GNSS never locked but the rest of the
  * telemetry (battery, signal, awake time) is still worth sending.
  */
-static int report_fix(const struct nrf_modem_gnss_pvt_data_frame *pvt,
-		      uint32_t wake_uptime_ms)
+static int report_fix(const struct tracker_fix *fix, uint32_t wake_uptime_ms)
 {
 	struct tracker_telemetry t = {
-		.longitude = pvt ? pvt->longitude : 0.0,
-		.latitude = pvt ? pvt->latitude : 0.0,
-		.hdop = pvt ? pvt->hdop : 0.0f,
+		.longitude = fix ? fix->longitude : 0.0,
+		.latitude = fix ? fix->latitude : 0.0,
+		.hdop = fix ? fix->hdop : 0.0f,
 		.awake_s = (uint32_t)((k_uptime_get() - wake_uptime_ms) / 1000),
 	};
 
@@ -152,11 +164,11 @@ static int report_fix(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 
 	if (err) {
 		LOG_ERR("Telemetry send failed (err %d)", err);
-	} else if (pvt != NULL) {
+	} else if (fix != NULL) {
 		/* Optional, off by default: makes the fix visible on the cloud
 		 * provider's own map view. Never sent for a synthesised 0,0.
 		 */
-		(void)cloud_send_location(pvt);
+		(void)cloud_send_location(fix);
 	}
 
 	watchdog_feed();
@@ -245,7 +257,7 @@ int main(void)
 		status_led_report(false);
 
 		/* Start GNSS and get the first fix of this wake cycle. */
-		struct nrf_modem_gnss_pvt_data_frame pvt;
+		struct tracker_fix fix;
 		bool assisted = false;
 
 		if (gnss_start() != 0) {
@@ -255,31 +267,52 @@ int main(void)
 			continue;
 		}
 
-		/* The modem asks for assistance within a second or two of starting,
-		 * but only when it actually lacks valid data - so this is a reliable
-		 * cold-start test that costs nothing on a warm receiver.
+		/* A-GNSS only helps the onboard receiver, and only when it is the
+		 * one running - gnss_agnss_request_wait() returns -EAGAIN while the
+		 * external module has the cycle, so this whole block is skipped
+		 * until (and unless) the fallback below fires. When the modem is
+		 * running it asks for assistance within a second or two of starting,
+		 * but only when it actually lacks valid data, which makes this a
+		 * reliable cold-start test that costs nothing on a warm receiver.
 		 */
-		if (IS_ENABLED(CONFIG_TRACKER_AGNSS) && !IS_ENABLED(CONFIG_TRACKER_SKIP_LTE) &&
-		    cloud_is_ready() &&
+		if (agnss_wanted() &&
 		    gnss_agnss_request_wait(CONFIG_TRACKER_AGNSS_PROACTIVE_WAIT_SECONDS) == 0) {
 			LOG_INF("Cold start: fetching A-GNSS assistance up front");
 			assisted = agnss_fetch_and_inject() == 0;
 		}
 
-		bool have_fix = gnss_wait_fix(&pvt,
-					      CONFIG_TRACKER_GNSS_FIX_TIMEOUT_SECONDS) == 0;
+		bool have_fix = gnss_wait_fix(&fix, gnss_fix_timeout_seconds()) == 0;
+
+		/* The external module had its window and did not lock. Hand the
+		 * cycle to the onboard receiver, which is slower but can be assisted.
+		 */
+		if (!have_fix && gnss_fallback_available()) {
+			LOG_WRN("No fix from the external module, falling back to the "
+				"onboard receiver");
+
+			if (gnss_fallback() == 0) {
+				if (agnss_wanted() &&
+				    gnss_agnss_request_wait(
+					    CONFIG_TRACKER_AGNSS_PROACTIVE_WAIT_SECONDS) == 0) {
+					LOG_INF("Cold start: fetching A-GNSS assistance");
+					assisted = agnss_fetch_and_inject() == 0;
+				}
+
+				have_fix = gnss_wait_fix(&fix,
+							 gnss_fix_timeout_seconds()) == 0;
+			}
+		}
 
 		/* Nothing after the full window. If we have not already pulled
 		 * assistance this cycle, it is worth a shot before giving up.
 		 */
-		if (!have_fix && !assisted && IS_ENABLED(CONFIG_TRACKER_AGNSS) &&
-		    !IS_ENABLED(CONFIG_TRACKER_SKIP_LTE) && cloud_is_ready()) {
-			LOG_WRN("No fix after %d s, falling back to A-GNSS assistance",
-				CONFIG_TRACKER_GNSS_FIX_TIMEOUT_SECONDS);
+		if (!have_fix && !assisted && agnss_wanted()) {
+			LOG_WRN("No fix after %u s, falling back to A-GNSS assistance",
+				gnss_fix_timeout_seconds());
 
 			if (agnss_fetch_and_inject() == 0) {
 				have_fix = gnss_wait_fix(
-					&pvt, CONFIG_TRACKER_AGNSS_FIX_TIMEOUT_SECONDS) == 0;
+					&fix, CONFIG_TRACKER_AGNSS_FIX_TIMEOUT_SECONDS) == 0;
 			}
 		}
 		watchdog_feed();
@@ -290,9 +323,9 @@ int main(void)
 			 */
 			if (CONFIG_TRACKER_GNSS_EXTRA_FIX_SECONDS > 0) {
 				k_sleep(K_SECONDS(CONFIG_TRACKER_GNSS_EXTRA_FIX_SECONDS));
-				(void)gnss_wait_fix(&pvt, 5);
+				(void)gnss_wait_fix(&fix, 5);
 			}
-			report_fix(&pvt, wake_uptime_ms);
+			report_fix(&fix, wake_uptime_ms);
 			status_led_report(true);
 		} else if (IS_ENABLED(CONFIG_TRACKER_FORCE_PUBLISH_WITHOUT_FIX)) {
 			LOG_WRN("No GNSS fix this cycle, reporting position 0,0");
@@ -313,8 +346,8 @@ int main(void)
 			while (power_is_charging()) {
 				k_sleep(K_SECONDS(CONFIG_TRACKER_CHARGING_INTERVAL_SECONDS));
 				watchdog_feed();
-				if (gnss_wait_fix(&pvt, 10) == 0) {
-					report_fix(&pvt, wake_uptime_ms);
+				if (gnss_wait_fix(&fix, 10) == 0) {
+					report_fix(&fix, wake_uptime_ms);
 					status_led_report(true);
 				} else if (IS_ENABLED(CONFIG_TRACKER_FORCE_PUBLISH_WITHOUT_FIX)) {
 					LOG_WRN("No GNSS fix, reporting position 0,0");

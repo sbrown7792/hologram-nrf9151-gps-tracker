@@ -273,7 +273,7 @@ int cloud_send_telemetry(const char *inner_json)
 			 nrf_cloud_coap_json_message_send(envelope, false, true));
 }
 
-int cloud_send_location(const struct nrf_modem_gnss_pvt_data_frame *pvt)
+int cloud_send_location(const struct tracker_fix *fix)
 {
 	if (!IS_ENABLED(CONFIG_TRACKER_NRF_CLOUD_PORTAL_LOCATION)) {
 		return 0;
@@ -284,12 +284,31 @@ int cloud_send_location(const struct nrf_modem_gnss_pvt_data_frame *pvt)
 		return 0;
 	}
 
+	/* NRF_CLOUD_GNSS_TYPE_PVT rather than the modem-native MODEM_PVT: it
+	 * carries everything the portal map shows and takes the same fields from
+	 * either receiver, so there is no per-source encoding here.
+	 */
 	int64_t ts_ms;
 	struct nrf_cloud_gnss_data gnss = {
-		.type = NRF_CLOUD_GNSS_TYPE_MODEM_PVT,
+		.type = NRF_CLOUD_GNSS_TYPE_PVT,
 		.ts_ms = (date_time_now(&ts_ms) == 0) ? ts_ms : NRF_CLOUD_NO_TIMESTAMP,
-		.mdm_pvt = (struct nrf_modem_gnss_pvt_data_frame *)pvt,
+		.pvt = {
+			.lat = fix->latitude,
+			.lon = fix->longitude,
+			.accuracy = fix->accuracy,
+			.alt = fix->altitude,
+			.speed = fix->speed,
+			.heading = fix->heading,
+			.has_alt = 1,
+			.has_speed = 1,
+			.has_heading = 1,
+		},
 	};
 
 	return normalize("Portal location send", nrf_cloud_coap_location_send(&gnss, false));
+}
+
+bool cloud_supports_agnss(void)
+{
+	return true;
 }

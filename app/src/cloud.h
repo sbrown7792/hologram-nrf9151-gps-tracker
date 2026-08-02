@@ -1,11 +1,11 @@
 /*
  * Telemetry transport interface.
  *
- * One of the implementations below is compiled in, selected by the
- * TRACKER_CLOUD_TRANSPORT Kconfig choice (see CMakeLists.txt):
+ * One of the implementations below is compiled in, selected by
+ * CONFIG_TRACKER_CLOUD_PROVIDER (see Kconfig and CMakeLists.txt):
  *
- *   cloud_nrf.c       nRF Cloud over CoAP/DTLS  (CONFIG_TRACKER_CLOUD_NRF)
- *   cloud_hologram.c  Hologram Cloud Socket/TCP (CONFIG_TRACKER_CLOUD_HOLOGRAM)
+ *   cloud_nrf.c       nRF Cloud over CoAP/DTLS  ("nrfcloud")
+ *   cloud_hologram.c  Hologram Cloud Socket/TCP ("hologram")
  *
  * main.c talks only to this header, so switching transports never touches the
  * report loop.
@@ -18,7 +18,7 @@
 
 #include <stdbool.h>
 
-#include <nrf_modem_gnss.h>
+#include "fix.h"
 
 /**
  * @brief Prepare the transport. Call once at startup.
@@ -54,6 +54,16 @@ void cloud_pause(void);
 bool cloud_is_ready(void);
 
 /**
+ * @brief Whether this provider can serve A-GNSS assistance.
+ *
+ * Assistance is fetched over the same session as telemetry, so it is available
+ * only from nRF Cloud. A "hologram" build still compiles the assistance module
+ * (CONFIG_TRACKER_AGNSS is independent of the provider) but never has anywhere
+ * to fetch from, and the report loop skips it on this.
+ */
+bool cloud_supports_agnss(void);
+
+/**
  * @brief Send one telemetry report.
  *
  * @param inner_json  The payload from telemetry_build_json(). Transports wrap
@@ -69,9 +79,9 @@ int cloud_send_telemetry(const char *inner_json);
  * telemetry payload above remains the real data path. Compiles to a no-op
  * returning 0 for transports (or configurations) that do not support it.
  *
- * @param pvt  A valid fix. Never called for a synthesised 0,0 report.
+ * @param fix  A valid fix. Never called for a synthesised 0,0 report.
  * @return 0 on success or when unsupported, negative errno otherwise.
  */
-int cloud_send_location(const struct nrf_modem_gnss_pvt_data_frame *pvt);
+int cloud_send_location(const struct tracker_fix *fix);
 
 #endif /* GPS_TRACKER_CLOUD_H_ */

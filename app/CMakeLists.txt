@@ -16,6 +16,7 @@ target_sources(app PRIVATE
 	src/main.c
 	src/startup.c
 	src/gnss.c
+	src/gnss_modem.c
 	src/power.c
 	src/telemetry.c
 	src/watchdog.c
@@ -27,6 +28,10 @@ target_sources_ifdef(CONFIG_TRACKER_CLOUD_HOLOGRAM app PRIVATE
 	src/cloud_hologram.c
 	src/hologram.c
 )
+
+# The external GNSS module is additive: gnss.c arbitrates between it and the
+# onboard receiver, which is always built.
+target_sources_ifdef(CONFIG_TRACKER_GNSS_EXTERNAL app PRIVATE src/gnss_ext.c)
 
 target_sources_ifdef(CONFIG_TRACKER_AGNSS app PRIVATE src/agnss.c)
 target_sources_ifdef(CONFIG_TRACKER_STATUS_LED app PRIVATE src/status_led.c)

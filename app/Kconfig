@@ -2,17 +2,37 @@
 
 mainmenu "GPS Tracker"
 
-choice TRACKER_CLOUD_TRANSPORT
-	prompt "Telemetry transport"
-	default TRACKER_CLOUD_NRF
+config TRACKER_CLOUD_PROVIDER
+	string "Telemetry cloud provider: \"nrfcloud\" or \"hologram\""
+	default "nrfcloud"
 	help
-	  Where telemetry reports are published. Both transports send the same
+	  Where telemetry reports are published. Both providers send the same
 	  payload from telemetry_build_json(), so the web app's schema is
 	  unchanged either way - only the envelope around it and the backend's
 	  polling endpoint differ.
 
+	  "nrfcloud" is CoAP over DTLS and requires per-device credentials in the
+	  modem key store; see the README for the one-time provisioning steps. It
+	  is also the only provider that can serve A-GNSS assistance.
+
+	  "hologram" is the Embedded Cloud Socket over plain TCP and needs an
+	  8-character Data Engine device key, which Hologram does not issue for
+	  Hyper-provisioned SIMs.
+
+	  Changing this one line is the whole switch: every provider-specific
+	  option below and in prj.conf stays valid either way.
+
 config TRACKER_CLOUD_NRF
-	bool "nRF Cloud (CoAP over DTLS)"
+	bool
+	default y if TRACKER_CLOUD_PROVIDER = "nrfcloud"
+
+config TRACKER_CLOUD_HOLOGRAM
+	bool
+	default y if TRACKER_CLOUD_PROVIDER = "hologram"
+
+config TRACKER_CLOUD_NRF_LIB
+	bool
+	default y
 	select NRF_CLOUD
 	select NRF_CLOUD_COAP
 	select NRF_CLOUD_CHECK_CREDENTIALS
@@ -24,21 +44,17 @@ config TRACKER_CLOUD_NRF
 	select NET_SOCKETS_OFFLOAD
 	select NET_IPV4
 	help
-	  Requires per-device credentials in the modem key store; see the README
-	  for the one-time provisioning steps. Unlike the Hologram path this also
-	  enables A-GNSS assistance, which is the main reason to prefer it.
-
-config TRACKER_CLOUD_HOLOGRAM
-	bool "Hologram Embedded Cloud Socket (plain TCP)"
-	help
-	  Needs an 8-character Data Engine device key, which Hologram does not
-	  issue for Hyper-provisioned SIMs.
-
-endchoice
+	  Hidden, and deliberately unconditional: the nRF Cloud stack is pulled in
+	  whichever provider is selected, so that every CONFIG_NRF_CLOUD_*,
+	  CONFIG_COAP_* and CONFIG_DATE_TIME* line in prj.conf remains a valid
+	  assignment. Zephyr aborts the build on a handwritten assignment that
+	  does not take effect, so without this a "hologram" build would need its
+	  own conf file. Only cloud_nrf.c or cloud_hologram.c is compiled (see
+	  CMakeLists.txt), and --gc-sections drops the unreferenced library code
+	  from a Hologram image.
 
 config TRACKER_NRF_CLOUD_APP_ID
 	string "appId reported in the nRF Cloud device message envelope"
-	depends on TRACKER_CLOUD_NRF
 	default "GPSTRACKER"
 	help
 	  Deliberately not "GNSS": nRF Cloud's built-in GNSS card expects
@@ -48,7 +64,6 @@ config TRACKER_NRF_CLOUD_APP_ID
 
 config TRACKER_NRF_CLOUD_PORTAL_LOCATION
 	bool "Also send position in nRF Cloud's native format"
-	depends on TRACKER_CLOUD_NRF
 	help
 	  Sends a second, standard GNSS message per report so the device shows up
 	  on the nRF Cloud portal's map. Useful when debugging in the field
@@ -65,7 +80,6 @@ config TRACKER_CLOUD_CONNECT_BUDGET_SECONDS
 
 config TRACKER_MODEM_TIME_WAIT_SECONDS
 	int "Bounded wait for modem network time before the first connect (seconds)"
-	depends on TRACKER_CLOUD_NRF
 	default 60
 	help
 	  The JWT used to authenticate is signed by the modem, which needs network
@@ -73,17 +87,21 @@ config TRACKER_MODEM_TIME_WAIT_SECONDS
 
 config TRACKER_AGNSS
 	bool "Fetch A-GNSS assistance from nRF Cloud"
-	depends on TRACKER_CLOUD_NRF
 	default y
 	select NRF_CLOUD_AGNSS
 	select MODEM_INFO
 	select MODEM_INFO_ADD_NETWORK
 	help
 	  Downloads ephemerides, almanac, time and a coarse position and injects
-	  them into GNSS. Requested proactively when the modem signals it has no
-	  valid assistance (cold start), and as a fallback when a fix attempt
-	  times out. Typically cuts time-to-first-fix from over a minute to a few
-	  seconds, which mostly shows up as battery life.
+	  them into the onboard GNSS. Requested proactively when the modem signals
+	  it has no valid assistance (cold start), and as a fallback when a fix
+	  attempt times out. Typically cuts time-to-first-fix from over a minute
+	  to a few seconds, which mostly shows up as battery life.
+
+	  Only ever applies to the onboard receiver, and only when the provider is
+	  "nrfcloud" - both are runtime checks (see agnss_wanted() in main.c), so
+	  this stays selectable regardless. With an external GNSS module doing the
+	  acquiring it matters only on the fallback path.
 
 # These two shape the main report loop rather than the assistance module, so
 # they stay defined even when TRACKER_AGNSS is off - main.c references them
@@ -151,11 +169,13 @@ config TRACKER_WATCHDOG_MARGIN_SECONDS
 	  windows and an assistance download.
 
 config HOLOGRAM_DEVICE_KEY
-	string "Hologram device key (8-character 'Receive from Device' key)"
+	string "Hologram device key (8-character 'SIM Key')"
 	default "CHANGEME"
 	help
-	  Per-device key from the Hologram dashboard (Device page -> Receive from
-	  Device). Used to authenticate to the Embedded Cloud Socket API.
+	  Per-device key used to authenticate to the Embedded Cloud Socket API.
+	  On the dashboard: open the device, Webhooks tab, Webhook key section,
+	  "Show key" next to SIM Key. It is not the numeric device ID shown under
+	  Device Details, nor the account-wide REST API key.
 
 config HOLOGRAM_HOST
 	string "Hologram Cloud Socket hostname"
@@ -181,12 +201,92 @@ config TRACKER_CHARGING_INTERVAL_SECONDS
 	default 60
 
 config TRACKER_GNSS_FIX_TIMEOUT_SECONDS
-	int "Maximum time to wait for a GNSS fix (seconds)"
+	int "Maximum time to wait for an onboard GNSS fix (seconds)"
 	default 120
 
 config TRACKER_GNSS_EXTRA_FIX_SECONDS
 	int "Extra time to keep GNSS running after first fix for better accuracy"
 	default 5
+
+config TRACKER_GNSS_EXTERNAL
+	bool "Use an external NMEA GNSS module (Adafruit Ultimate GPS v3)"
+	default y
+	select GNSS
+	select PM_DEVICE
+	select GPIO
+	help
+	  Takes position from a UART GNSS module instead of the modem's own
+	  receiver, because the onboard one does not acquire fast enough in
+	  practice even with A-GNSS. The module must appear in devicetree as a
+	  "gnss-nmea-generic" node labelled gnss_ext on an enabled UART - see
+	  boards/circuitdojo_feather_nrf9151_ns.overlay.
+
+	  The onboard receiver stays compiled in as a fallback, so this is not an
+	  either/or: see TRACKER_GNSS_EXT_MODEM_FALLBACK.
+
+if TRACKER_GNSS_EXTERNAL
+
+config TRACKER_GNSS_EXT_POWER_PIN
+	int "GPIO0 pin driving the GNSS module's power FET (high = powered)"
+	default 13
+	range 0 31
+	help
+	  The N-FET gate. Held low so the module draws nothing until a report
+	  cycle needs a fix. This is a Kconfig value rather than a devicetree
+	  gpios property - unlike every other pin on this board - purely so the
+	  wiring can be changed in one place with the rest of the tracker's
+	  settings.
+
+	  Pins 1-8, 10-12, 19 and 23-25 are already taken by the board (i2c2,
+	  button, spi3, PMIC interrupt, uart0, accelerometer interrupts, uart1
+	  and pwm0). Set this to match your actual wiring before flashing.
+
+config TRACKER_GNSS_EXT_WARMUP_MS
+	int "Delay after powering the module before reading NMEA (milliseconds)"
+	default 500
+	help
+	  The receiver needs a moment to boot and start emitting sentences.
+	  Opening the UART earlier only gives the parser garbage to discard, and
+	  the wait is paid once per wake cycle.
+
+config TRACKER_GNSS_EXT_FIX_TIMEOUT_SECONDS
+	int "Maximum time to wait for an external GNSS fix (seconds)"
+	default 60
+	help
+	  Deliberately shorter than TRACKER_GNSS_FIX_TIMEOUT_SECONDS: with the
+	  backup cell keeping ephemerides alive across the power cut, a warm start
+	  lands in seconds. If it has not locked by the end of this window, the
+	  onboard receiver plus assistance is a better bet than waiting longer.
+
+config TRACKER_GNSS_EXT_UERE_METERS
+	int "Assumed user-equivalent range error for the accuracy estimate (metres)"
+	default 3
+	help
+	  NMEA carries no position accuracy figure, so it is approximated as HDOP
+	  times this. Only used for the optional nRF Cloud portal location message,
+	  which requires the field; the telemetry payload does not carry accuracy.
+
+config TRACKER_GNSS_EXT_POWER_CYCLE
+	bool "Cut module power between report cycles"
+	default y
+	help
+	  Opens the FET for the duration of the battery sleep, which is where
+	  nearly all of the module's ~25 mA would otherwise go. Safe to leave on
+	  when the CR1220 backup cell is fitted: the module keeps its RTC and
+	  ephemerides, so the next wake is a warm start rather than a ~34 s cold
+	  one. Turn this off if there is no backup cell and cold starts are
+	  costing more than the module's running current.
+
+config TRACKER_GNSS_EXT_MODEM_FALLBACK
+	bool "Fall back to the onboard receiver when the module does not lock"
+	default y
+	help
+	  After TRACKER_GNSS_EXT_FIX_TIMEOUT_SECONDS with no fix, power the module
+	  down and give the rest of the cycle to the modem's GNSS, with A-GNSS
+	  assistance if the provider can serve it. Covers a disconnected antenna
+	  or a dead module at the cost of a longer awake time on those cycles.
+
+endif # TRACKER_GNSS_EXTERNAL
 
 config TRACKER_LTE_CONNECT_TIMEOUT_SECONDS
 	int "Bounded LTE connection attempt timeout (seconds)"

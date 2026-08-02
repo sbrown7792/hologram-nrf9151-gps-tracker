@@ -1,16 +1,49 @@
 /*
- * Hand the nPM1300 RGB LED channels to the application.
+ * Application devicetree overlay for the nRF9151 Feather.
  *
- * The board defaults are LED0 = "error" and LED1 = "charging" (driven by the
- * PMIC itself); the LED driver refuses led_on()/led_off() (-EPERM) on any
- * channel that is not in "host" mode. Taking all three lets the tracker show
- * its own connectivity/fix state instead - see src/status_led.c.
+ *   - hands the nPM1300 RGB LED channels to the application,
+ *   - claims uart1 for the external GNSS module.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/*
+ * The board defaults are LED0 = "error" and LED1 = "charging" (driven by the
+ * PMIC itself); the LED driver refuses led_on()/led_off() (-EPERM) on any
+ * channel that is not in "host" mode. Taking all three lets the tracker show
+ * its own connectivity/fix state instead - see src/status_led.c.
+ */
 &npm1300_leds {
 	nordic,led0-mode = "host";
 	nordic,led1-mode = "host";
 	nordic,led2-mode = "host";
+};
+
+/*
+ * uart1 is the board's designated modem-trace UART, but tracing is not enabled
+ * in this application and uart1 is the only free serial slot on the SoC (0 is
+ * the console, 2 is i2c2, 3 is spi3). Drop the chosen so nothing can quietly
+ * claim it back.
+ */
+/ {
+	chosen {
+		/delete-property/ nordic,modem-trace-uart;
+	};
+};
+
+/*
+ * External GNSS module (Adafruit Ultimate GPS v3, MTK3339) on the stock uart1
+ * pins: P0.24 TX -> module RX, P0.23 RX <- module TX. 9600 baud and 1 Hz
+ * GGA + RMC are the module's power-up defaults, so it needs no configuring.
+ *
+ * Its supply is switched separately by an N-FET on the GPIO named in
+ * CONFIG_TRACKER_GNSS_EXT_POWER_PIN - see src/gnss_ext.c.
+ */
+&uart1 {
+	status = "okay";
+	current-speed = <9600>;
+
+	gnss_ext: gnss-nmea-generic {
+		compatible = "gnss-nmea-generic";
+	};
 };

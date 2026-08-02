@@ -31,7 +31,7 @@ LOG_MODULE_REGISTER(hologram, LOG_LEVEL_INF);
  */
 BUILD_ASSERT(sizeof(CONFIG_HOLOGRAM_DEVICE_KEY) == 9,
 	     "CONFIG_HOLOGRAM_DEVICE_KEY must be exactly 8 characters "
-	     "(Hologram dashboard -> Device -> Receive from Device)");
+	     "(dashboard -> device -> Webhooks -> Webhook key -> SIM Key)");
 
 /* Build {"k":...,"d":...,"t":[...]} + "\n\n" into buf. */
 static int build_envelope(const char *inner_json, char *buf, size_t len)
@@ -176,8 +176,8 @@ int hologram_send(const char *inner_json)
 	 */
 	if (strcmp(CONFIG_HOLOGRAM_DEVICE_KEY, "CHANGEME") == 0) {
 		LOG_ERR("CONFIG_HOLOGRAM_DEVICE_KEY is still the default; set the "
-			"8-character device key from the Hologram dashboard "
-			"(Device -> Receive from Device)");
+			"8-character SIM Key from the Hologram dashboard "
+			"(device -> Webhooks -> Webhook key -> Show key)");
 		return -EACCES;
 	}
 

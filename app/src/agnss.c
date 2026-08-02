@@ -10,8 +10,12 @@
  * NRF_CLOUD_REST_AGNSS_REQ_CUSTOM and rejects the "just send me everything"
  * types with -ENOTSUP, so a populated request frame is mandatory. It normally
  * comes from the modem itself (NRF_MODEM_GNSS_EVT_AGNSS_REQ, captured in
- * gnss.c); the synthesised fallback exists only for the case where we need
- * assistance before the modem has asked for any.
+ * gnss_modem.c); the synthesised fallback exists only for the case where we
+ * need assistance before the modem has asked for any.
+ *
+ * This talks to gnss_modem.c rather than to the gnss.h arbiter: assistance is
+ * meaningful only for the onboard receiver, and the caller has already put it
+ * in charge of the cycle by the time we get here.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -30,7 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "gnss.h"
+#include "gnss_modem.h"
 #include "watchdog.h"
 
 LOG_MODULE_REGISTER(agnss, LOG_LEVEL_INF);
@@ -130,7 +134,7 @@ static int fetch_and_inject(void)
 	bool have_cell_info;
 	int err;
 
-	if (!gnss_agnss_request_get(&req)) {
+	if (!gnss_modem_agnss_request_get(&req)) {
 		if (!IS_ENABLED(CONFIG_TRACKER_AGNSS_FULL_REQUEST_FALLBACK)) {
 			LOG_WRN("GNSS has not requested assistance; nothing to fetch");
 			return -EAGAIN;
@@ -215,7 +219,7 @@ int agnss_fetch_and_inject(void)
 	 * not running.
 	 */
 	if (stopped) {
-		gnss_stop();
+		gnss_modem_stop();
 	}
 
 	/* The main thread blocks inside the CoAP exchange and cannot feed the
@@ -225,7 +229,7 @@ int agnss_fetch_and_inject(void)
 	err = fetch_and_inject();
 	watchdog_guard_stop();
 
-	if (stopped && gnss_start() != 0) {
+	if (stopped && gnss_modem_start() != 0) {
 		LOG_ERR("Failed to restart GNSS after the assistance fetch");
 		return -EIO;
 	}

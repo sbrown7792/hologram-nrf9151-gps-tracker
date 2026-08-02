@@ -37,11 +37,19 @@ int cloud_send_telemetry(const char *inner_json)
 	return hologram_send(inner_json);
 }
 
-int cloud_send_location(const struct nrf_modem_gnss_pvt_data_frame *pvt)
+int cloud_send_location(const struct tracker_fix *fix)
 {
 	/* The Data Engine has no native position format; coords are already in
 	 * the telemetry payload.
 	 */
-	ARG_UNUSED(pvt);
+	ARG_UNUSED(fix);
 	return 0;
+}
+
+bool cloud_supports_agnss(void)
+{
+	/* Assistance is an nRF Cloud service and needs its session; a Hologram
+	 * build has no way to reach it.
+	 */
+	return false;
 }

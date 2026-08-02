@@ -1,10 +1,13 @@
 # GPS Tracker — CircuitDojo nRF9151 Feather
 
 A GNSS + telemetry tracker for the [CircuitDojo nRF9151 Feather](https://www.jaredwolff.com/store/nrf9160-feather/),
-built on the nRF Connect SDK / Zephyr. It acquires a GNSS fix, builds a telemetry
-JSON payload, and pushes it into the **Hologram Data Engine** over Hologram's
-Embedded **Cloud Socket API**. See [`app/README.md`](app/README.md) for the
-application's behavior, configuration, and source layout.
+built on the nRF Connect SDK / Zephyr. It acquires a GNSS fix — from an external
+NMEA module where one is fitted, otherwise from the nRF9151's own receiver —
+builds a telemetry JSON payload, and publishes it to **nRF Cloud** over CoAP/DTLS
+or to the **Hologram Data Engine** over the Embedded **Cloud Socket API**,
+whichever `CONFIG_TRACKER_CLOUD_PROVIDER` selects. See
+[`app/README.md`](app/README.md) for the application's behavior, configuration,
+and source layout.
 
 This is a **freestanding (Zephyr "T2") application**. It does not vendor the SDK.
 The [`west.yml`](west.yml) manifest imports CircuitDojo's
@@ -35,8 +38,10 @@ west build -b circuitdojo_feather_nrf9151/nrf9151/ns application/app
 Output: `build/merged.hex` (MCUboot + TF-M + app). Flash via the CircuitDojo
 serial bootloader (`newtmgr`/`mcumgr`, MODE button) or a J-Link / probe-rs.
 
-Before a real build, set at least the Hologram device key — see
-[`app/README.md`](app/README.md#configuration).
+Before a real build, set the GPIO pin driving the external GNSS module's power FET
+and — for the Hologram provider — the device key. See
+[`app/README.md`](app/README.md#gnss-sources) and
+[Cloud provider](app/README.md#cloud-provider).
 
 ## License
 
