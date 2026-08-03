@@ -22,13 +22,14 @@ default because it is the only one that can serve
 - Acquire a GNSS fix from the [external module](#gnss-sources), falling back to the
   onboard receiver — with [A-GNSS assistance](#a-gnss-assistance) — if it does not lock.
   A short settle window after the first fix improves accuracy.
-- Send `{"coords":[lon,lat],"hdop":H,"batt":%,"volt":mV,"charge":C,"signal":S,"awake":s,`
-  `"vbus":bool,"fw":"x.y.z","hw":"rev"}` — see [Telemetry payload](#telemetry-payload).
+- Send the [telemetry payload](#telemetry-payload) — position, battery, signal and a
+  little provenance.
 - While externally powered (VBUS present): report every
   `TRACKER_CHARGING_INTERVAL_SECONDS` (default 60 s).
-- On battery: LTE PSM + `k_sleep(TRACKER_SLEEP_SECONDS)` (default ~9 min). Applying
-  external power during the sleep wakes it early (nPM1300 VBUS-detect), replacing the
-  original PWR_SENS interrupt.
+- On battery: LTE PSM + `TRACKER_SLEEP_SECONDS` (default ~9 min). Applying external
+  power during the sleep wakes it early (nPM1300 VBUS-detect), replacing the original
+  PWR_SENS interrupt.
+- A jolt during that sleep also wakes it — see [Wake on motion](#wake-on-motion).
 - Hardware watchdog resets the SoC if a cycle wedges.
 
 ## Status LED
@@ -42,16 +43,28 @@ The nPM1300 RGB LED shows connectivity at a glance:
 | green | LTE registered **and** GNSS fix |
 | dark | sleeping on battery |
 
-The pattern carries the charge state on top of that colour:
+The pattern carries where the power is coming from:
 
 | Pattern | Meaning |
 |---------|---------|
-| blinking | battery charging (trickle / CC / CV) |
-| solid | charge complete, or running on battery |
+| solid | externally powered **and** the battery is full |
+| blinking at 1 Hz | externally powered and charging |
+| 100 ms flash every 2 s | running on battery |
 
-Blinking runs on the system workqueue (the PMIC sinks have no hardware blink), so
-it continues through reports and sleeps. The charge state itself is re-sampled at
-cycle boundaries, so a completed charge goes solid within one report interval
+So a continuously lit LED means one thing only — plugged in and topped up. "Full" is a
+state of charge above `TRACKER_STATUS_LED_FULL_PERCENT` (95%), or the PMIC's own
+charge-complete flag, whichever comes first. The threshold is the primary definition
+because it does not depend on whether a charge cycle happened to run and terminate.
+
+The on-battery pattern is a low-duty flash rather than a symmetric blink because,
+unlike the charging blink, it is paid for out of the battery it is reporting on: the
+sink draws ~5 mA lit, so 100 ms in 2 s averages ~0.25 mA. A short flash on a short
+period is the better trade in both directions — more chances to catch it, and half
+the current of a longer flash on a longer period.
+
+Both patterns run on the system workqueue (the PMIC sinks have no hardware blink), so
+they continue through reports and sleeps. The power state is re-sampled at cycle
+boundaries, so a completed charge goes solid within one report interval
 (`TRACKER_CHARGING_INTERVAL_SECONDS`, default 60 s).
 
 The PMIC's LED outputs are on/off current sinks, so yellow is red + green lit
@@ -59,14 +72,17 @@ together. Taking all three channels into `host` mode
 (`boards/circuitdojo_feather_nrf9151_ns.overlay`) gives up the PMIC's automatic
 error/charging indication on LED0/LED1.
 
-To save power the LED is blanked for the duration of a battery sleep and only lit
-while the tracker is awake; while externally powered it stays lit. Options:
+To save power the LED is blanked for the duration of a battery sleep, so on battery
+you see the flash only while the tracker is awake. Options:
 
 ```
-CONFIG_TRACKER_STATUS_LED=n              # no LED at all
-CONFIG_TRACKER_STATUS_LED_ON_BATTERY=y   # keep it lit through the battery sleep
-CONFIG_TRACKER_STATUS_LED_BLINK_MS=500   # charging blink half-period
-CONFIG_TRACKER_STATUS_LED_RED_INDEX=0    # swap if the colours come out wrong
+CONFIG_TRACKER_STATUS_LED=n                 # no LED at all
+CONFIG_TRACKER_STATUS_LED_ON_BATTERY=y      # keep flashing through the battery sleep
+CONFIG_TRACKER_STATUS_LED_BLINK_MS=500      # charging blink half-period -> 1 Hz
+CONFIG_TRACKER_STATUS_LED_FLASH_ON_MS=100   # on-battery flash, lit
+CONFIG_TRACKER_STATUS_LED_FLASH_OFF_MS=1900 # on-battery flash, dark
+CONFIG_TRACKER_STATUS_LED_FULL_PERCENT=95   # at or above this, solid rather than blinking
+CONFIG_TRACKER_STATUS_LED_RED_INDEX=0       # swap if the colours come out wrong
 CONFIG_TRACKER_STATUS_LED_GREEN_INDEX=1
 ```
 
@@ -118,6 +134,62 @@ spi3), so the overlay deletes the `nordic,modem-trace-uart` chosen and claims it
 `TRACKER_GNSS_EXT_FIX_TIMEOUT_SECONDS` with no fix the external module is powered down
 and the rest of the cycle goes to the modem, which is slower but can be assisted. This
 is also the only path on which A-GNSS does anything.
+
+## Wake on motion
+
+The tracker lives in a car, so a nine-minute sleep means a tow or a collision goes
+unreported for up to nine minutes and then produces a single point. The onboard LIS2DH
+accelerometer closes that gap: its any-motion detector raises a hardware interrupt on a
+jolt, with nothing awake to poll it.
+
+On a jolt the tracker wakes and reports every `TRACKER_CHARGING_INTERVAL_SECONDS` — the
+same cadence as external power, and literally the same loop, with GNSS kept running so
+each fix is instant. It stops when one of two things happens:
+
+- **External power arrives.** The condition is `vbus || surge`, so a jolt that turns out
+  to be you getting in flows straight into normal powered operation with no gap and no
+  re-acquire. This is the designed false-alarm path — false alarms are cheap.
+- **`TRACKER_MOTION_SURGE_SECONDS` pass with no further movement.** Measured from the
+  *most recent* jolt, not the first, so an active tow keeps reporting for as long as it
+  is being moved. Note that means an extended surge has no upper bound; a car on a rough
+  trailer will report every 60 s until it stops or the battery does.
+
+Reports carry `"wake": "motion"` for the whole surge, so the web app can show it as one
+event rather than a run of unrelated points.
+
+```
+CONFIG_TRACKER_MOTION_WAKE=y                   # n = no accelerometer wake at all
+CONFIG_TRACKER_MOTION_THRESHOLD_MG=350         # jolt threshold, ~16 mg hardware steps
+CONFIG_TRACKER_MOTION_DURATION_SAMPLES=0       # debounce in samples; 0 = first sample
+CONFIG_TRACKER_MOTION_ODR_HZ=10                # sample rate while armed
+CONFIG_TRACKER_MOTION_SURGE_SECONDS=600        # quiet time before returning to sleep
+```
+
+Motion is armed only on battery. While the car is running the sensor would raise a
+continuous stream of events that all get discarded, each costing a transaction on the
+bus it shares with the PMIC.
+
+There is no cooldown between surges: the tracker re-arms as soon as it returns to sleep.
+That means closing the door on your way out will usually start a surge. Raising
+`TRACKER_MOTION_THRESHOLD_MG` is the first lever if that proves annoying.
+
+### The high-pass filter is not optional
+
+`CONFIG_LIS2DH_ACCEL_HP_FILTERS=y` and the `CTRL2` write in `motion_init()` are what make
+this work at all. The LIS2DH's any-motion detector compares each axis against the
+threshold in absolute terms, and the Zephyr driver never touches `CTRL2`, so the filter
+defaults off. A board sitting still already reads ~1000 mg on one axis from gravity —
+far above any sane threshold — so the interrupt would assert immediately and never
+clear. Enabling `HPIS2` strips the DC component so only transients get through.
+
+If the tracker wakes constantly with the board untouched, that is the first thing to
+look at: adjust the `CTRL2` byte in [src/motion.c](src/motion.c), specifically the `HPM`
+bits (7:6) and `HPCF` cutoff (5:4), not just `HPIS2`. `HPM = 11` (autoreset on interrupt,
+`CTRL2 = 0xC2`) is the next thing to try.
+
+The trigger mode and filter options live in a Kconfig `choice` and a driver menu, so
+`TRACKER_MOTION_WAKE` cannot select them; they are set in `prj.conf` and `motion.c`
+fails the build with a pointer to them if they are missing.
 
 ## A-GNSS assistance
 
@@ -248,7 +320,7 @@ directly comparable.
 
 ```json
 {"coords": [-71.149272, 41.744192], "hdop": 0.98, "batt": 90, "volt": 4062,
- "charge": 0, "signal": -92, "awake": 148, "vbus": false,
+ "charge": 0, "signal": -92, "awake": 148, "vbus": false, "wake": "timer",
  "fw": "2026-08-02T17:51Z", "hw": "feather-nrf9151"}
 ```
 
@@ -262,14 +334,21 @@ directly comparable.
 | `signal` | RSRP in dBm (negative). `0` when there is no valid reading |
 | `awake` | Seconds since the start of this wake cycle |
 | `vbus` | External power present |
+| `wake` | Why the cycle started: `boot`, `timer`, `vbus` or `motion` |
 | `fw` | UTC build time of the firmware, `YYYY-MM-DDThh:mmZ` |
 | `hw` | Board, from `CONFIG_TRACKER_HW_REVISION` |
 
-Three things a reader needs to know:
+Four things a reader needs to know:
 
-- **`charge` is not the same as `vbus`.** `charge` reports only what the charger is
-  doing. A full battery on a live USB lead is `vbus: true, charge: 0`. Infer "plugged
-  in" from `vbus`, never from `charge`.
+- **`charge` is not the same as `vbus`.** They come from different PMIC registers:
+  `charge` is what the charger is doing, `vbus` is whether a supply is attached. A
+  completed charge on a live lead is `vbus: true, charge: 2`. Read "plugged in" from
+  `vbus` — that is what it was added for.
+- **`wake` describes the cycle, not the report.** Every report in a
+  [motion surge](#wake-on-motion) is tagged `"motion"`, including the ones sent after
+  external power arrives — that is what makes the surge identifiable as a single event.
+  `"boot"` marks the first report after a reset, which is how a watchdog reset shows up
+  in the data.
 - **`charge: 0, volt: 0` means the PMIC read failed**, not a flat battery. Worth
   displaying as unknown rather than plotting a zero.
 - **`charge` is not Dash-compatible.** The Konekt Dash sent its `charge_status`
@@ -299,7 +378,7 @@ member:
 {"appId":"GPSTRACKER","messageType":"DATA","ts":1754035200000,
  "data":{"coords": [151.2, -33.8], "hdop": 1.20, "batt": 87, "volt": 4010,
          "charge": 0, "signal": -85, "awake": 43, "vbus": false,
-         "fw": "1.0.0", "hw": "feather-nrf9151"}}
+         "wake": "timer", "fw": "2026-08-02T17:51Z", "hw": "feather-nrf9151"}}
 ```
 
 The web app polls nRF Cloud instead of the Hologram Data Engine and reads
@@ -356,6 +435,8 @@ bootloader (`newtmgr`/`mcumgr`, MODE button) or a J-Link/probe-rs.
 | `src/gnss_modem.c` | Onboard `nrf_modem_gnss` fix acquisition + assistance requests |
 | `src/gnss_ext.c` | External NMEA module: power FET, UART lifecycle, fix conversion |
 | `src/agnss.c` | Downloads A-GNSS assistance and injects it into the modem |
+| `src/motion.c` | LIS2DH any-motion interrupt: jolt detection during the battery sleep |
+| `src/wake.c` | The interruptible sleep, and which of VBUS/motion ended it |
 | `src/power.c` | nPM1300 battery voltage, charge state, VBUS-detect wake |
 | `src/status_led.c` | RGB status LED on the nPM1300 LED sinks |
 | `src/telemetry.c` | Builds the inner JSON payload (+ LiPo battery curve) |

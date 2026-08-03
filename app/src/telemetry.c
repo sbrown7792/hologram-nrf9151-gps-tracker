@@ -69,11 +69,11 @@ int telemetry_build_json(const struct tracker_telemetry *t, char *buf, size_t le
 			 "{\"coords\": [%.6f, %.6f], \"hdop\": %.2f, "
 			 "\"batt\": %u, \"volt\": %u, \"charge\": %d, "
 			 "\"signal\": %d, \"awake\": %u, \"vbus\": %s, "
-			 "\"fw\": \"%s\", \"hw\": \"%s\"}",
+			 "\"wake\": \"%s\", \"fw\": \"%s\", \"hw\": \"%s\"}",
 			 t->longitude, t->latitude, (double)t->hdop,
 			 telemetry_battery_percent(t->batt_mv), t->batt_mv,
 			 (int)t->charge, t->signal_dbm, t->awake_s,
-			 t->vbus ? "true" : "false",
+			 t->vbus ? "true" : "false", wake_reason_name(t->wake),
 			 TRACKER_BUILD_STAMP, CONFIG_TRACKER_HW_REVISION);
 
 	if (n < 0 || (size_t)n >= len) {

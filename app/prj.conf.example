@@ -109,6 +109,16 @@ CONFIG_SENSOR=y
 CONFIG_MFD=y
 CONFIG_REGULATOR=y
 
+# --- Wake-on-motion (onboard LIS2DH accelerometer) ----------------------
+# The trigger mode lives in a Kconfig choice and the filter option in a driver
+# menu, so neither can be selected from TRACKER_MOTION_WAKE - they have to be
+# set here. HP_FILTERS is not optional: without it the any-motion detector
+# compares absolute acceleration, and the 1 g a stationary board already reads
+# would hold the interrupt asserted permanently.
+CONFIG_LIS2DH_TRIGGER_GLOBAL_THREAD=y
+CONFIG_LIS2DH_ACCEL_HP_FILTERS=y
+CONFIG_LIS2DH_OPER_MODE_LOW_POWER=y
+
 # Watchdog (~10 minute safety reset, mirrors the original hardware WDT)
 CONFIG_WATCHDOG=y
 

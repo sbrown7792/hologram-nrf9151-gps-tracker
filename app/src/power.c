@@ -2,8 +2,8 @@
  * Power / battery / external-power (VBUS) handling via the nPM1300 PMIC.
  *
  * VBUS connect/disconnect is detected through the nPM1300 MFD event callback
- * (pattern from nfed/samples/usb_detect). A VBUS-connect event releases a
- * semaphore so a battery sleep can be cut short and the tracker can start
+ * (pattern from nfed/samples/usb_detect). A VBUS-connect event calls
+ * wake_signal() so a battery sleep can be cut short and the tracker can start
  * reporting frequently, mirroring the original PWR_SENS wakeup.
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -18,6 +18,8 @@
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/drivers/sensor/npm13xx_charger.h>
 #include <zephyr/logging/log.h>
+
+#include "wake.h"
 
 LOG_MODULE_REGISTER(power, LOG_LEVEL_INF);
 
@@ -35,7 +37,6 @@ static const struct device *pmic = DEVICE_DT_GET(DT_NODELABEL(npm1300_pmic));
 static const struct device *charger = DEVICE_DT_GET(DT_NODELABEL(npm1300_charger));
 
 static struct gpio_callback event_cb;
-static K_SEM_DEFINE(wake_sem, 0, 1);
 static volatile bool vbus_connected;
 
 static bool read_vbus_present(void)
@@ -68,7 +69,7 @@ static void event_callback(const struct device *dev, struct gpio_callback *cb,
 
 	if (pins & BIT(NPM13XX_EVENT_VBUS_DETECTED)) {
 		vbus_connected = true;
-		k_sem_give(&wake_sem);
+		wake_signal(TRACKER_WAKE_VBUS);
 	}
 
 	if (pins & BIT(NPM13XX_EVENT_VBUS_REMOVED)) {
@@ -170,13 +171,3 @@ int power_read(uint16_t *batt_mv, enum tracker_charge_state *charge_state)
 	return 0;
 }
 
-bool power_wait_interruptible(uint32_t seconds)
-{
-	k_sem_reset(&wake_sem);
-	int r = k_sem_take(&wake_sem, K_SECONDS(seconds));
-
-	/* r == 0  -> VBUS connect event woke us early.
-	 * r == -EAGAIN -> full sleep elapsed.
-	 */
-	return r == 0;
-}

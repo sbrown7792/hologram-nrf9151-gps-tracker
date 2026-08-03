@@ -53,14 +53,8 @@ enum tracker_charge_state power_charge_state(void);
  */
 int power_read(uint16_t *batt_mv, enum tracker_charge_state *charge_state);
 
-/**
- * @brief Interruptible sleep: sleep for @p seconds, or wake early if external
- *        power is connected.
- *
- * Replaces the original PWR_SENS rising-edge wakeup.
- *
- * @return true if woken early by VBUS connect, false if the full time elapsed.
+/* Interruptible sleep lives in wake.h: external power is only one of the two
+ * things that can end one, so the wait belongs with neither producer.
  */
-bool power_wait_interruptible(uint32_t seconds);
 
 #endif /* GPS_TRACKER_POWER_H_ */

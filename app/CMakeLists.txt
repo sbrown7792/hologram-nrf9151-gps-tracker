@@ -19,6 +19,7 @@ target_sources(app PRIVATE
 	src/gnss_modem.c
 	src/power.c
 	src/telemetry.c
+	src/wake.c
 	src/watchdog.c
 )
 
@@ -34,6 +35,7 @@ target_sources_ifdef(CONFIG_TRACKER_CLOUD_HOLOGRAM app PRIVATE
 target_sources_ifdef(CONFIG_TRACKER_GNSS_EXTERNAL app PRIVATE src/gnss_ext.c)
 
 target_sources_ifdef(CONFIG_TRACKER_AGNSS app PRIVATE src/agnss.c)
+target_sources_ifdef(CONFIG_TRACKER_MOTION_WAKE app PRIVATE src/motion.c)
 target_sources_ifdef(CONFIG_TRACKER_STATUS_LED app PRIVATE src/status_led.c)
 
 # Firmware build stamp for the telemetry "fw" field. Regenerated on every build

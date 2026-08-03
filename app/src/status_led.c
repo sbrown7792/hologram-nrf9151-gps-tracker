@@ -1,9 +1,13 @@
 /*
- * RGB status LED driven through the nPM1300 LED sinks.
+ * RGB status LED driven through the nPM1300 LED sinks. See status_led.h.
  *
- * The colour encodes connectivity; while the battery is charging the same
- * colour is blinked from the system workqueue (the PMIC sinks have no hardware
- * blink), so the tracker can keep reporting or sleeping meanwhile.
+ * The colour encodes connectivity and the pattern encodes the power source. The
+ * PMIC sinks have no hardware blink, so both blink patterns are modulated from
+ * the system workqueue and carry on while the tracker reports or sleeps.
+ *
+ * The on and off phases have separate durations, because the on-battery pattern
+ * is a brief flash on a long period rather than a symmetric blink - it has to
+ * be cheap enough to leave running.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -21,8 +25,6 @@ LOG_MODULE_REGISTER(status_led, LOG_LEVEL_INF);
 #define LED_GREEN CONFIG_TRACKER_STATUS_LED_GREEN_INDEX
 #define LED_BLUE  CONFIG_TRACKER_STATUS_LED_BLUE_INDEX
 
-#define BLINK_HALF_PERIOD K_MSEC(CONFIG_TRACKER_STATUS_LED_BLINK_MS)
-
 static const struct device *leds = DEVICE_DT_GET(DT_NODELABEL(npm1300_leds));
 static bool available;
 
@@ -31,11 +33,27 @@ static bool available;
  * from main, and the work is cancelled synchronously before main takes over.
  */
 static enum tracker_status current_status = TRACKER_STATUS_OFF;
+static enum tracker_led_pattern current_pattern = TRACKER_LED_SOLID;
 static bool blinking;
 static bool lit;
 
 static void blink_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(blink_work, blink_work_handler);
+
+/* How long to stay in the phase just entered. */
+static k_timeout_t phase_delay(bool now_lit)
+{
+	switch (current_pattern) {
+	case TRACKER_LED_CHARGING:
+		return K_MSEC(CONFIG_TRACKER_STATUS_LED_BLINK_MS);
+	case TRACKER_LED_BATTERY:
+		return now_lit ? K_MSEC(CONFIG_TRACKER_STATUS_LED_FLASH_ON_MS)
+			       : K_MSEC(CONFIG_TRACKER_STATUS_LED_FLASH_OFF_MS);
+	case TRACKER_LED_SOLID:
+	default:
+		return K_FOREVER;
+	}
+}
 
 static void set_channel(uint32_t channel, bool on)
 {
@@ -71,7 +89,7 @@ static void blink_work_handler(struct k_work *work)
 	ARG_UNUSED(work);
 
 	apply(!lit);
-	k_work_reschedule(&blink_work, BLINK_HALF_PERIOD);
+	k_work_reschedule(&blink_work, phase_delay(lit));
 }
 
 /* Stop blinking and make sure the handler is not mid-run, so the caller is the
@@ -118,24 +136,41 @@ void status_led_set(enum tracker_status status)
 	apply(true);
 
 	if (blinking) {
-		k_work_reschedule(&blink_work, BLINK_HALF_PERIOD);
+		k_work_reschedule(&blink_work, phase_delay(true));
 	}
 }
 
-void status_led_charging(bool charging)
+void status_led_pattern(enum tracker_led_pattern pattern)
 {
-	if (!available || charging == blinking) {
+	if (!available) {
 		return;
 	}
 
-	if (charging) {
-		blinking = true;
-		apply(true);
-		k_work_reschedule(&blink_work, BLINK_HALF_PERIOD);
-	} else {
+	bool want_blink = pattern != TRACKER_LED_SOLID;
+
+	/* Compare against what the LED is actually doing, not just the last
+	 * pattern asked for: status_led_sleep() cancels the blink work without
+	 * changing the pattern, so on waking the two disagree and the pattern has
+	 * to be re-established.
+	 */
+	if (pattern == current_pattern && want_blink == blinking) {
+		return;
+	}
+
+	current_pattern = pattern;
+
+	if (pattern == TRACKER_LED_SOLID) {
 		stop_blink();
 		apply(true);
+		return;
 	}
+
+	/* Start lit so the change is visible at once rather than after a whole
+	 * off phase - which for the battery flash would be several seconds.
+	 */
+	blinking = true;
+	apply(true);
+	k_work_reschedule(&blink_work, phase_delay(true));
 }
 
 void status_led_sleep(void)
