@@ -198,29 +198,80 @@ config TRACKER_MOTION_THRESHOLD_MG
 
 config TRACKER_MOTION_DURATION_SAMPLES
 	int "Samples the threshold must be exceeded for"
-	default 0
+	default 2
 	range 0 127
 	help
 	  Debounce, counted in accelerometer samples, so the wall-clock time is
-	  this divided by TRACKER_MOTION_ODR_HZ. 0 fires on the first sample over
-	  the threshold, which is what you want for a jolt; raise it to ignore
-	  single-sample spikes at the cost of missing sharp impacts.
+	  this divided by TRACKER_MOTION_ODR_HZ - 40 ms at the defaults. 0 fires on
+	  the first sample over the line, which also means a single noisy sample
+	  wakes the tracker; a couple of samples rejects those while a real jolt,
+	  which rings for a good fraction of a second, still gets through.
+
+	  Only useful if the ODR is high enough for a few samples to be a short
+	  time. At 10 Hz the smallest debounce available is 100 ms, which is long
+	  enough to miss a sharp impact entirely.
 
 config TRACKER_MOTION_ODR_HZ
 	int "Accelerometer output data rate while armed (Hz)"
-	default 10
+	default 50
 	help
-	  The rate the sensor samples at, and so how quickly a jolt is noticed and
-	  how much current it draws across a nine-minute sleep. 10 Hz is a few
-	  microamps and detects within ~100 ms. Must be one of the rates the
-	  LIS2DH supports: 1, 10, 25, 50, 100, 200 or 400.
+	  The rate the sensor samples at: how quickly a jolt is noticed, how fine
+	  the TRACKER_MOTION_DURATION_SAMPLES debounce can be, and how much current
+	  is drawn across a nine-minute sleep. Must be one of the rates the LIS2DH
+	  supports: 1, 10, 25, 50, 100, 200 or 400.
+
+	  50 Hz costs single-digit microamps and puts five samples inside a 100 ms
+	  event, which is what makes a debounce worth having. Dropping to 10 Hz
+	  saves a little current but samples only every 100 ms, so short impacts
+	  can fall between samples.
+
+config TRACKER_MOTION_HP_CUTOFF
+	int "High-pass filter cutoff selector (0-3)"
+	default 2
+	range 0 3
+	help
+	  The HPCF field of the LIS2DH's CTRL2. Per the datasheet the cutoff is a
+	  fraction of the output data rate: 0 = ODR/50, 1 = ODR/100, 2 = ODR/200,
+	  3 = ODR/400.
+
+	  Because it tracks the ODR, raising TRACKER_MOTION_ODR_HZ also raises the
+	  cutoff and filters out more slow movement. The default pairs with 50 Hz
+	  to put the corner near 0.25 Hz, roughly where it sat at 10 Hz and
+	  ODR/50 - low enough that gravity is still removed, high enough that a
+	  slow push or rock of the car still registers.
+
+	  Raise the selector (lower cutoff) if slow movement is being missed; lower
+	  it if slow drift is causing false wakes.
 
 endif # TRACKER_MOTION_WAKE
 
-# Shapes the main report loop rather than the motion module, so it stays defined
-# even when TRACKER_MOTION_WAKE is off - surge_active() in main.c references it
-# unconditionally and lets the compiler drop the dead branch. Same reasoning as
-# the two A-GNSS timings above.
+# These two shape the main report loop rather than the motion module, so they
+# stay defined even when TRACKER_MOTION_WAKE is off - main.c references them
+# unconditionally and lets the compiler drop the dead branches. Same reasoning
+# as the two A-GNSS timings above.
+
+config TRACKER_MOTION_SETTLE_CYCLES
+	int "Battery sleeps to let pass after losing power before arming motion"
+	default 1
+	range 0 20
+	help
+	  Losing external power means the engine just stopped, which is the exact
+	  moment someone is collecting their things and slamming doors. Arming the
+	  jolt interrupt straight away turns every trip you take into a ten-minute
+	  surge. This delays it by whole wake cycles instead.
+
+	  0 arms on the first sleep after power is lost. 1 finishes the cycle,
+	  sleeps TRACKER_SLEEP_SECONDS unarmed, wakes and reports as usual, and
+	  arms before the sleep after that - so roughly nine minutes of grace,
+	  which is comfortably longer than it takes to walk away from a car.
+
+	  The count restarts whenever external power is seen again, so every
+	  unplug gets the full delay. It does not restart on a reset: a tracker
+	  that reboots while parked arms on its first sleep rather than leaving
+	  the car unwatched for another cycle.
+
+	  The cost is that the car is genuinely unwatched for that long after you
+	  park. Set 0 if that matters more than the false surges.
 
 config TRACKER_MOTION_SURGE_SECONDS
 	int "How long frequent reporting continues after a jolt (seconds)"
@@ -423,12 +474,12 @@ config TRACKER_STATUS_LED_BLINK_MS
 
 config TRACKER_STATUS_LED_FLASH_ON_MS
 	int "On time of the on-battery flash (milliseconds)"
-	default 100
+	default 50
 	range 20 10000
 
 config TRACKER_STATUS_LED_FLASH_OFF_MS
 	int "Off time of the on-battery flash (milliseconds)"
-	default 1900
+	default 1950
 	range 100 60000
 	help
 	  Together with TRACKER_STATUS_LED_FLASH_ON_MS this is the "running on

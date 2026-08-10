@@ -160,18 +160,72 @@ event rather than a run of unrelated points.
 ```
 CONFIG_TRACKER_MOTION_WAKE=y                   # n = no accelerometer wake at all
 CONFIG_TRACKER_MOTION_THRESHOLD_MG=350         # jolt threshold, ~16 mg hardware steps
-CONFIG_TRACKER_MOTION_DURATION_SAMPLES=0       # debounce in samples; 0 = first sample
-CONFIG_TRACKER_MOTION_ODR_HZ=10                # sample rate while armed
+CONFIG_TRACKER_MOTION_DURATION_SAMPLES=2       # debounce in samples -> 40 ms at 50 Hz
+CONFIG_TRACKER_MOTION_ODR_HZ=50                # sample rate while armed
+CONFIG_TRACKER_MOTION_HP_CUTOFF=2              # filter corner: 0=ODR/50 .. 3=ODR/400
+CONFIG_TRACKER_MOTION_SETTLE_CYCLES=1          # sleeps to skip after losing power
 CONFIG_TRACKER_MOTION_SURGE_SECONDS=600        # quiet time before returning to sleep
 ```
+
+### Tuning the threshold
+
+Three things interact, and the threshold on its own is the least useful of them.
+
+**The threshold quantises to ~15.6 mg.** It is 7 bits of full scale, and 2 g is already
+the smallest scale, so that is the hardware floor. The Kconfig value in mg rounds *down*
+to the nearest step, which makes neighbouring values identical — 100, 105 and 110 mg are
+all one setting. Steps near the bottom of the useful range:
+
+| Register | Threshold |
+|---|---|
+| 5 | 78.1 mg |
+| 6 | 93.8 mg |
+| 7 | 109.4 mg |
+| 8 | 125.0 mg |
+| 9 | 140.6 mg |
+| 10 | 156.2 mg |
+
+**The operating mode sets the noise floor** the threshold has to clear.
+`CONFIG_LIS2DH_OPER_MODE_LOW_POWER` is 8-bit and the noisiest; `NORMAL` is 10-bit and
+`HIGH_RES` 12-bit. The difference between them is a few microamps — nothing next to the
+modem — so if low thresholds are producing false wakes, this is the first thing to change,
+not the threshold.
+
+**The debounce rejects what is left.** `TRACKER_MOTION_DURATION_SAMPLES` requires the
+threshold to be exceeded on consecutive samples, which a noise spike rarely manages and a
+real jolt easily does. It is only useful if the ODR is high enough for a few samples to be
+a short time: at 10 Hz the smallest debounce is 100 ms, long enough to miss a sharp impact,
+which is why the default ODR is 50 Hz.
+
+Note that the filter corner tracks the ODR (`ODR / 50` at `HP_CUTOFF=0`), so raising the
+sample rate also filters out more slow movement. Raise `TRACKER_MOTION_HP_CUTOFF` to
+compensate — the defaults pair 50 Hz with `ODR/200` to keep the corner near 0.25 Hz.
+
+### Arming, and the grace period after parking
 
 Motion is armed only on battery. While the car is running the sensor would raise a
 continuous stream of events that all get discarded, each costing a transaction on the
 bus it shares with the PMIC.
 
-There is no cooldown between surges: the tracker re-arms as soon as it returns to sleep.
-That means closing the door on your way out will usually start a surge. Raising
-`TRACKER_MOTION_THRESHOLD_MG` is the first lever if that proves annoying.
+Losing external power means the engine just stopped, which is exactly when someone is
+collecting their things and slamming doors — so arming immediately would turn every trip
+into a ten-minute surge. `TRACKER_MOTION_SETTLE_CYCLES` (default 1) lets whole wake
+cycles pass first:
+
+```
+power lost -> finish cycle -> sleep 9 min unarmed -> wake, report as usual
+                                                  -> arm, then sleep
+```
+
+`0` arms on the first sleep instead. The count restarts whenever external power is seen
+again, so every unplug gets the full grace period, but *not* on a reset: a tracker that
+reboots while parked arms on its first sleep rather than leaving the car unwatched for
+another cycle.
+
+The cost is real — the car is genuinely unwatched for that first cycle after you park.
+Set `0` if that matters more than the false surges do.
+
+There is no cooldown between surges themselves: once armed, every jolt starts a new one.
 
 ### The high-pass filter is not optional
 
@@ -183,9 +237,10 @@ far above any sane threshold — so the interrupt would assert immediately and n
 clear. Enabling `HPIS2` strips the DC component so only transients get through.
 
 If the tracker wakes constantly with the board untouched, that is the first thing to
-look at: adjust the `CTRL2` byte in [src/motion.c](src/motion.c), specifically the `HPM`
-bits (7:6) and `HPCF` cutoff (5:4), not just `HPIS2`. `HPM = 11` (autoreset on interrupt,
-`CTRL2 = 0xC2`) is the next thing to try.
+look at. The cutoff is reachable as `TRACKER_MOTION_HP_CUTOFF`; the mode is not, so
+changing `HPM` means editing the `CTRL2` value in [src/motion.c](src/motion.c) —
+`HPM = 11` (autoreset on interrupt, i.e. `0xC0` on top of the rest) is the next thing
+to try.
 
 The trigger mode and filter options live in a Kconfig `choice` and a driver menu, so
 `TRACKER_MOTION_WAKE` cannot select them; they are set in `prj.conf` and `motion.c`
@@ -321,7 +376,7 @@ directly comparable.
 ```json
 {"coords": [-71.149272, 41.744192], "hdop": 0.98, "batt": 90, "volt": 4062,
  "charge": 0, "signal": -92, "awake": 148, "vbus": false, "wake": "timer",
- "fw": "2026-08-02T17:51Z", "hw": "feather-nrf9151"}
+ "wdt": 0, "fw": "2026-08-02T17:51Z", "hw": "feather-nrf9151"}
 ```
 
 | Field | Meaning |
@@ -335,6 +390,7 @@ directly comparable.
 | `awake` | Seconds since the start of this wake cycle |
 | `vbus` | External power present |
 | `wake` | Why the cycle started: `boot`, `timer`, `vbus` or `motion` |
+| `wdt` | Where the loop was when the watchdog last reset the device; `0` if the last boot was clean — see [Watchdog forensics](#watchdog-forensics) |
 | `fw` | UTC build time of the firmware, `YYYY-MM-DDThh:mmZ` |
 | `hw` | Board, from `CONFIG_TRACKER_HW_REVISION` |
 
@@ -368,6 +424,38 @@ Set the board string with `CONFIG_TRACKER_HW_REVISION` in `prj.conf`.
 Separately, [`VERSION`](VERSION) carries a semantic version that Zephyr turns into the
 **MCUboot image version**. It does not appear in telemetry, but MCUboot uses it to
 order images, so bump it when you cut a release you intend to deploy over DFU.
+
+## Watchdog forensics
+
+The watchdog resets the SoC if a cycle wedges, which is the right behaviour and also
+destroys the evidence. The `wdt` field carries a breadcrumb across the reset saying where
+the report loop was when it fired.
+
+`watchdog_phase()` stores a small integer in `.noinit` at each step of the loop. That
+section is not cleared by the C startup and a watchdog reset does not power-cycle the
+RAM, so the value survives; `watchdog_init()` latches it, logs it, and it then rides out
+in `wdt` on every subsequent report until the next reset. It is sticky rather than
+one-shot so you can read it off any record, not just the one tagged `"wake": "boot"`.
+
+| `wdt` | Phase | | `wdt` | Phase |
+|---|---|---|---|---|
+| 0 | clean boot, or marker not retained | | 7 | building/sending a report |
+| 1 | top of the loop | | 8 | powered / surge report loop |
+| 2 | `lte_ensure_connected()` | | 9 | `gnss_stop()`, incl. the UART suspend |
+| 3 | `cloud_resume()` | | 10 | `cloud_pause()` |
+| 4 | `gnss_start()` | | 11 | `status_led_sleep()` |
+| 5 | A-GNSS fetch and inject | | 12 | arming the accelerometer (I2C) |
+| 6 | waiting for a fix | | 13 | inside the battery sleep |
+
+The numbers are sent raw and matched against `enum tracker_phase` in
+[src/watchdog.h](src/watchdog.h) by hand, so only ever **append** to that enum.
+
+**Verify retention before trusting it.** A `wdt` of 0 means either "the last boot was
+clean" or "`.noinit` did not survive" — the linkage is right (the markers land above
+`__bss_end`), but nothing here proves TF-M leaves non-secure RAM alone across a reset.
+The boot log distinguishes the two: `Restarted from phase N (name)` versus `Cold boot, no
+retained phase marker`. Force a watchdog reset on the bench once and check which you get
+before reading anything into field data.
 
 ## Backend contract
 

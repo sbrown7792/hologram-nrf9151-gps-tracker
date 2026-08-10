@@ -37,12 +37,18 @@ BUILD_ASSERT(IS_ENABLED(CONFIG_LIS2DH_TRIGGER),
  * this register is SENSOR_ATTR_CONFIGURATION, which writes the byte verbatim.
  *
  *   bits 7:6 HPM   high-pass mode, 00 = normal
- *   bits 5:4 HPCF  cutoff select, 00 = highest (ODR/50)
+ *   bits 5:4 HPCF  cutoff select, as a fraction of the ODR
  *   bit  3   FDS   filter the *output* data too - left off, we want raw samples
  *   bit  1   HPIS2 apply the filter to the AOI2 (any-motion) generator
+ *
+ * The cutoff tracks the ODR, so raising TRACKER_MOTION_ODR_HZ raises it too -
+ * which is why the selector is a config knob rather than a constant.
  */
-#define LIS2DH_CTRL2_HPIS2 BIT(1)
-#define LIS2DH_CTRL2_VALUE LIS2DH_CTRL2_HPIS2
+#define LIS2DH_CTRL2_HPIS2      BIT(1)
+#define LIS2DH_CTRL2_HPCF_SHIFT 4
+#define LIS2DH_CTRL2_VALUE                                                                 \
+	(LIS2DH_CTRL2_HPIS2 |                                                              \
+	 (CONFIG_TRACKER_MOTION_HP_CUTOFF << LIS2DH_CTRL2_HPCF_SHIFT))
 
 static const struct device *const accel = DEVICE_DT_GET(DT_ALIAS(accel0));
 

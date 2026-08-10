@@ -12,6 +12,8 @@
 /* Generated at build time by cmake/build_stamp.cmake. */
 #include <tracker_build_stamp.h>
 
+#include "watchdog.h"
+
 /* A point in a battery discharge curve. */
 struct battery_level_point {
 	uint16_t lvl_pptt; /* remaining capacity, parts-per-ten-thousand */
@@ -69,12 +71,14 @@ int telemetry_build_json(const struct tracker_telemetry *t, char *buf, size_t le
 			 "{\"coords\": [%.6f, %.6f], \"hdop\": %.2f, "
 			 "\"batt\": %u, \"volt\": %u, \"charge\": %d, "
 			 "\"signal\": %d, \"awake\": %u, \"vbus\": %s, "
-			 "\"wake\": \"%s\", \"fw\": \"%s\", \"hw\": \"%s\"}",
+			 "\"wake\": \"%s\", \"wdt\": %d, \"fw\": \"%s\", "
+			 "\"hw\": \"%s\"}",
 			 t->longitude, t->latitude, (double)t->hdop,
 			 telemetry_battery_percent(t->batt_mv), t->batt_mv,
 			 (int)t->charge, t->signal_dbm, t->awake_s,
 			 t->vbus ? "true" : "false", wake_reason_name(t->wake),
-			 TRACKER_BUILD_STAMP, CONFIG_TRACKER_HW_REVISION);
+			 (int)watchdog_reset_phase(), TRACKER_BUILD_STAMP,
+			 CONFIG_TRACKER_HW_REVISION);
 
 	if (n < 0 || (size_t)n >= len) {
 		return -ENOMEM;

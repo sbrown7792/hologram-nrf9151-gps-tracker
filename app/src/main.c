@@ -211,6 +211,8 @@ static int report_fix(const struct tracker_fix *fix, uint32_t wake_uptime_ms,
 
 	char payload[256];
 
+	watchdog_phase(TRACKER_PHASE_REPORT);
+
 	if (telemetry_build_json(&t, payload, sizeof(payload)) < 0) {
 		LOG_ERR("Telemetry payload too large");
 		return -ENOMEM;
@@ -245,16 +247,36 @@ static int report_fix(const struct tracker_fix *fix, uint32_t wake_uptime_ms,
 	return err;
 }
 
+/* Battery sleeps taken since external power was last seen, saturating at the
+ * settle threshold. Starts there so a reset while parked arms on the first
+ * sleep: the delay exists to cover someone getting out of the car, and nobody
+ * is getting out of a rebooting tracker.
+ */
+static uint32_t battery_sleeps = CONFIG_TRACKER_MOTION_SETTLE_CYCLES;
+
 /* The battery sleep, shared by the three places that take one.
  *
- * Motion stays armed from here until external power turns up, which is what
- * lets a jolt during the awake part of a cycle still count towards the surge
- * window. Only VBUS disarms it - see the report loop.
+ * Motion is armed here and stays armed until external power turns up, which is
+ * what lets a jolt during the awake part of a cycle still count towards the
+ * surge window. Only VBUS disarms it - see the report loop.
  */
 static enum tracker_wake_reason battery_sleep(void)
 {
+	bool arm = battery_sleeps >= CONFIG_TRACKER_MOTION_SETTLE_CYCLES;
+
+	watchdog_phase(TRACKER_PHASE_LED_SLEEP);
 	status_led_sleep();
-	motion_set_armed(true);
+
+	watchdog_phase(TRACKER_PHASE_MOTION_ARM);
+	motion_set_armed(arm);
+
+	if (!arm) {
+		LOG_INF("Motion wake held off for %u more sleep(s) after losing power",
+			CONFIG_TRACKER_MOTION_SETTLE_CYCLES - battery_sleeps);
+		battery_sleeps++;
+	}
+
+	watchdog_phase(TRACKER_PHASE_SLEEP);
 
 	enum tracker_wake_reason reason = wake_wait(CONFIG_TRACKER_SLEEP_SECONDS);
 
@@ -324,12 +346,21 @@ int main(void)
 		uint32_t wake_uptime_ms = (uint32_t)k_uptime_get();
 		bool motion_cycle = wake_reason == TRACKER_WAKE_MOTION;
 
+		/* Power was applied at some point, so someone was there: restart
+		 * the settle count even if it has gone away again by now.
+		 */
+		if (wake_reason == TRACKER_WAKE_VBUS) {
+			battery_sleeps = 0;
+		}
+
+		watchdog_phase(TRACKER_PHASE_WAKE);
 		watchdog_feed();
 
 		/* Bring up the network (unless in GNSS-only bench mode). On failure,
 		 * sleep and retry - the original "sleep 9 min, try again" behavior.
 		 */
 		if (!IS_ENABLED(CONFIG_TRACKER_SKIP_LTE)) {
+			watchdog_phase(TRACKER_PHASE_LTE);
 			if (lte_ensure_connected() != 0) {
 				LOG_WRN("Network unavailable, sleeping before retry");
 				status_led_set(TRACKER_STATUS_NO_LTE);
@@ -345,6 +376,7 @@ int main(void)
 		 * here is not fatal - we still try for a fix and retry the link
 		 * when the report is actually sent.
 		 */
+		watchdog_phase(TRACKER_PHASE_CLOUD_RESUME);
 		watchdog_guard_start(CONFIG_TRACKER_CLOUD_CONNECT_BUDGET_SECONDS);
 		(void)cloud_resume();
 		watchdog_guard_stop();
@@ -356,6 +388,7 @@ int main(void)
 		struct tracker_fix fix;
 		bool assisted = false;
 
+		watchdog_phase(TRACKER_PHASE_GNSS_START);
 		if (gnss_start() != 0) {
 			cloud_pause();
 			wake_reason = battery_sleep();
@@ -373,9 +406,11 @@ int main(void)
 		if (agnss_wanted() &&
 		    gnss_agnss_request_wait(CONFIG_TRACKER_AGNSS_PROACTIVE_WAIT_SECONDS) == 0) {
 			LOG_INF("Cold start: fetching A-GNSS assistance up front");
+			watchdog_phase(TRACKER_PHASE_AGNSS);
 			assisted = agnss_fetch_and_inject() == 0;
 		}
 
+		watchdog_phase(TRACKER_PHASE_FIX);
 		bool have_fix = gnss_wait_fix(&fix, gnss_fix_timeout_seconds()) == 0;
 
 		/* The external module had its window and did not lock. Hand the
@@ -445,11 +480,19 @@ int main(void)
 				CONFIG_TRACKER_CHARGING_INTERVAL_SECONDS);
 
 			while (power_vbus_present() || surge_active(motion_cycle)) {
-				/* Watching for jolts is pointless while the car is
-				 * running: every bump would raise an event we discard,
-				 * each costing a transaction on the PMIC's bus.
-				 */
-				motion_set_armed(!power_vbus_present());
+				watchdog_phase(TRACKER_PHASE_FREQUENT);
+
+				if (power_vbus_present()) {
+					/* Watching for jolts is pointless while the
+					 * car is running: every bump would raise an
+					 * event we discard, each costing a
+					 * transaction on the PMIC's bus. Being
+					 * powered also restarts the settle count, so
+					 * every unplug gets the full grace period.
+					 */
+					motion_set_armed(false);
+					battery_sleeps = 0;
+				}
 
 				k_sleep(K_SECONDS(CONFIG_TRACKER_CHARGING_INTERVAL_SECONDS));
 				watchdog_feed();
@@ -478,10 +521,12 @@ int main(void)
 		/* On battery: stop GNSS and sleep, waking early on external power or
 		 * a jolt.
 		 */
+		watchdog_phase(TRACKER_PHASE_GNSS_STOP);
 		gnss_stop();
 		/* Keep the session state so the next cycle can resume without paying
 		 * for another handshake.
 		 */
+		watchdog_phase(TRACKER_PHASE_CLOUD_PAUSE);
 		cloud_pause();
 		LOG_INF("On battery, sleeping up to %d s", CONFIG_TRACKER_SLEEP_SECONDS);
 		wake_reason = battery_sleep();
