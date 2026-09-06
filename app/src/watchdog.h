@@ -35,6 +35,10 @@ enum tracker_phase {
 	TRACKER_PHASE_LED_SLEEP = 11,
 	TRACKER_PHASE_MOTION_ARM = 12, /* sensor_trigger_set() over I2C */
 	TRACKER_PHASE_SLEEP = 13,      /* inside wake_wait() */
+	/* Not a place in the loop: set deliberately just before rebooting because
+	 * nothing has reached the cloud for too long. See recover_if_silent().
+	 */
+	TRACKER_PHASE_NO_NETWORK = 14,
 };
 
 /**

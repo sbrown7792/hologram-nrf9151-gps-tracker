@@ -17,6 +17,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/reboot.h>
 
 #include <modem/lte_lc.h>
 #include <modem/modem_info.h>
@@ -35,6 +36,13 @@
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 static K_SEM_DEFINE(lte_connected_sem, 0, 1);
+
+/* Uptime of the last report that actually reached the cloud; 0 means "not since
+ * boot", which the arithmetic in recover_if_silent() handles for free. Declared
+ * up here because report_fix() sets it well before that function is defined.
+ */
+static int64_t last_send_uptime;
+static bool modem_bounced;
 
 static void lte_handler(const struct lte_lc_evt *const evt)
 {
@@ -236,7 +244,11 @@ static int report_fix(const struct tracker_fix *fix, uint32_t wake_uptime_ms,
 
 	if (err) {
 		LOG_ERR("Telemetry send failed (err %d)", err);
-	} else if (fix != NULL) {
+	} else {
+		last_send_uptime = k_uptime_get();
+	}
+
+	if (!err && fix != NULL) {
 		/* Optional, off by default: makes the fix visible on the cloud
 		 * provider's own map view. Never sent for a synthesised 0,0.
 		 */
@@ -245,6 +257,54 @@ static int report_fix(const struct tracker_fix *fix, uint32_t wake_uptime_ms,
 
 	watchdog_feed();
 	return err;
+}
+
+/* Uptime of the last report that actually reached the cloud; 0 means "not since
+ * boot", which the arithmetic below handles for free.
+ *
+ * The watchdog covers a cycle that never ends. It cannot see the opposite
+ * failure - cycles that end promptly and achieve nothing - because each one
+ * feeds it on the way past. A modem that has wedged such that
+ * lte_lc_connect_async() fails immediately produces exactly that: wake, fail,
+ * flash red, sleep, forever, with the watchdog perfectly happy. This is the
+ * counterpart that notices.
+ */
+/* Escalating recovery for prolonged silence. Called once per cycle, before the
+ * network is needed, so a restart has the whole cycle to take effect.
+ */
+static void recover_if_silent(void)
+{
+	int64_t quiet_min = (k_uptime_get() - last_send_uptime) / 60000;
+
+	if (quiet_min < CONFIG_TRACKER_MODEM_RECOVERY_MINUTES) {
+		modem_bounced = false;
+		return;
+	}
+
+	if (quiet_min >= CONFIG_TRACKER_REBOOT_MINUTES) {
+		LOG_ERR("Nothing sent for %lld min, rebooting", quiet_min);
+		/* Leaves "wdt": 14 on the reports after the restart, so a
+		 * self-reboot is distinguishable from a watchdog reset and from a
+		 * power-on.
+		 */
+		watchdog_phase(TRACKER_PHASE_NO_NETWORK);
+		k_sleep(K_MSEC(200)); /* let the log drain */
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+
+	if (modem_bounced) {
+		return;
+	}
+
+	/* Cheaper than a reboot and usually enough: drop the modem to offline and
+	 * bring it back, which restarts the attach from scratch.
+	 */
+	LOG_WRN("Nothing sent for %lld min, restarting the modem", quiet_min);
+	modem_bounced = true;
+
+	(void)lte_lc_func_mode_set(LTE_LC_FUNC_MODE_OFFLINE);
+	k_sleep(K_SECONDS(1));
+	(void)lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
 }
 
 /* Battery sleeps taken since external power was last seen, saturating at the
@@ -355,6 +415,10 @@ int main(void)
 
 		watchdog_phase(TRACKER_PHASE_WAKE);
 		watchdog_feed();
+
+		if (!IS_ENABLED(CONFIG_TRACKER_SKIP_LTE)) {
+			recover_if_silent();
+		}
 
 		/* Bring up the network (unless in GNSS-only bench mode). On failure,
 		 * sleep and retry - the original "sleep 9 min, try again" behavior.

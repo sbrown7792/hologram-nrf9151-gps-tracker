@@ -435,6 +435,35 @@ config TRACKER_LTE_CONNECT_TIMEOUT_SECONDS
 	  On failure the tracker sleeps TRACKER_SLEEP_SECONDS and retries, rather
 	  than blocking forever (mirrors the original 'sleep 9 min, try again').
 
+config TRACKER_MODEM_RECOVERY_MINUTES
+	int "Silence before restarting the modem (minutes)"
+	default 30
+	help
+	  How long nothing may reach the cloud before the tracker drops the modem
+	  to offline and back, restarting the attach from scratch.
+
+	  The watchdog only catches a cycle that never ends. The opposite failure -
+	  cycles that end promptly and achieve nothing - feeds it on every pass and
+	  so runs forever: a modem wedged such that lte_lc_connect_async() returns
+	  an error immediately gives wake, fail, flash red, sleep, repeat, until
+	  somebody presses reset. This is what notices that instead.
+
+	  Measured from the last report that was actually accepted, not from the
+	  last attempt, so a run of failures accumulates rather than resetting.
+
+config TRACKER_REBOOT_MINUTES
+	int "Silence before rebooting outright (minutes)"
+	default 120
+	help
+	  The backstop, for when restarting the modem was not enough. Reports after
+	  the restart carry "wdt": 14, so a self-reboot is distinguishable from a
+	  watchdog reset and from someone pressing the button.
+
+	  Must be comfortably larger than TRACKER_MODEM_RECOVERY_MINUTES so the
+	  cheaper remedy gets a fair chance first. Note that genuine dead spots -
+	  an underground car park over a weekend - will reboot on this interval;
+	  that is wasteful but harmless, and the alternative is staying wedged.
+
 config TRACKER_STATUS_LED
 	bool "RGB status LED (red = no LTE, yellow = LTE only, green = LTE + fix)"
 	default y

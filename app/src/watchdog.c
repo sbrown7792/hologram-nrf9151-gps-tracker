@@ -181,6 +181,8 @@ const char *watchdog_phase_name(enum tracker_phase phase)
 		return "motion-arm";
 	case TRACKER_PHASE_SLEEP:
 		return "sleep";
+	case TRACKER_PHASE_NO_NETWORK:
+		return "no-network reboot";
 	case TRACKER_PHASE_NONE:
 	default:
 		return "none";

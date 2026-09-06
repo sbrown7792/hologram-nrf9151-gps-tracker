@@ -129,8 +129,11 @@ CONFIG_LIS2DH_ACCEL_HP_FILTERS=y
 # before noise starts waking the tracker on its own.
 CONFIG_LIS2DH_OPER_MODE_NORMAL=y
 
-# Watchdog (~10 minute safety reset, mirrors the original hardware WDT)
+# Watchdog (~10 minute safety reset, mirrors the original hardware WDT), plus
+# sys_reboot() for the self-restart when nothing has reached the cloud for a
+# long time - a failure the watchdog cannot see, since those cycles feed it.
 CONFIG_WATCHDOG=y
+CONFIG_REBOOT=y
 
 # Logging
 CONFIG_LOG=y

@@ -496,21 +496,25 @@ batches — messages that arrived a minute apart routinely share one `logged` va
 
 ## Build
 
-Bootstrap the workspace first (see the [top-level README](../README.md)), then
-from the **workspace root** with your toolchain environment activated:
+Bootstrap the workspace first (see the [top-level README](../README.md)), then build
+from the **workspace root**:
 
 ```
 source ~/.zephyrtools/env/bin/activate
-export ZEPHYR_BASE=$PWD/zephyr
+export ZEPHYR_BASE=~/dev/gps-tracker-ws/zephyr
 export ZEPHYR_TOOLCHAIN_VARIANT=zephyr
 export ZEPHYR_SDK_INSTALL_DIR=~/.zephyrtools/toolchain/zephyr-sdk-0.16.4
-export PATH="$HOME/.zephyrtools/ninja:$PATH"
+export PATH="$HOME/.zephyrtools/ninja:$HOME/.zephyrtools/cmake/bin:$PATH"
 
-west build -b circuitdojo_feather_nrf9151/nrf9151/ns application/app
+cd ~/dev/gps-tracker-ws
+west build -b circuitdojo_feather_nrf9151/nrf9151/ns -d ~/dev/build/gps application/app
 ```
 
-Output: `build/merged.hex` (MCUboot + TF-M + app). Flash via the CircuitDojo serial
-bootloader (`newtmgr`/`mcumgr`, MODE button) or a J-Link/probe-rs.
+Output: `merged.hex` in the build directory (MCUboot + TF-M + app). Flash via the
+CircuitDojo serial bootloader (`newtmgr`/`mcumgr`, MODE button) or a J-Link/probe-rs.
+
+Run `west` from the workspace root, never from inside `application/` - see the
+[top-level README](../README.md) for why that matters here.
 
 ## Source layout
 
