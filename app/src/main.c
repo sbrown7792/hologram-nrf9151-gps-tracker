@@ -200,7 +200,6 @@ static int report_fix(const struct tracker_fix *fix, uint32_t wake_uptime_ms,
 		.latitude = fix ? fix->latitude : 0.0,
 		.hdop = fix ? fix->hdop : 0.0f,
 		.awake_s = (uint32_t)((k_uptime_get() - wake_uptime_ms) / 1000),
-		.vbus = power_vbus_present(),
 		.wake = wake_reason,
 	};
 

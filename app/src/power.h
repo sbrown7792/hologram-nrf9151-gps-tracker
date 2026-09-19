@@ -27,8 +27,9 @@ int power_init(void);
  * @brief Is external power (VBUS) currently present?
  *
  * Used to decide between the frequent "charging" report loop and the long
- * battery sleep, replacing the original getChargeState() plugged-in check, and
- * reported as the telemetry "vbus" field.
+ * battery sleep, replacing the original getChargeState() plugged-in check.
+ * Not reported directly: telemetry carries @ref tracker_charge_state instead,
+ * where 1 and 2 both imply external power.
  *
  * Deliberately not named power_is_charging(): this is the supply, not the
  * charger. A full battery on a live USB lead is VBUS present with a charge

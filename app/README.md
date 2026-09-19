@@ -371,12 +371,13 @@ Flag names drift between nrfcloud-utils releases; check `--help` if yours is not
 
 Built by `telemetry_build_json()` and identical on both providers. New fields are
 appended, never inserted, so the leading part of an old record and a new one stay
-directly comparable.
+directly comparable. Fields that would carry no information are left out rather than
+sent as a zero — every byte is metered cellular data.
 
 ```json
 {"coords": [-71.149272, 41.744192], "hdop": 0.98, "batt": 90, "volt": 4062,
- "charge": 0, "signal": -92, "awake": 148, "vbus": false, "wake": "timer",
- "wdt": 0, "fw": "2026-08-02T17:51Z", "hw": "feather-nrf9151"}
+ "charge": 0, "signal": -92, "awake": 148, "wake": "timer",
+ "fw": "2026-08-02T17:51Z", "hw": "feather-nrf9151"}
 ```
 
 | Field | Meaning |
@@ -388,18 +389,22 @@ directly comparable.
 | `charge` | Charger activity: `0` discharging, `1` charging, `2` complete |
 | `signal` | RSRP in dBm (negative). `0` when there is no valid reading |
 | `awake` | Seconds since the start of this wake cycle |
-| `vbus` | External power present |
 | `wake` | Why the cycle started: `boot`, `timer`, `vbus` or `motion` |
-| `wdt` | Where the loop was when the watchdog last reset the device; `0` if the last boot was clean — see [Watchdog forensics](#watchdog-forensics) |
+| `wdt` | **Optional.** Where the loop was when the watchdog last reset the device. Absent after a clean boot — see [Watchdog forensics](#watchdog-forensics) |
 | `fw` | UTC build time of the firmware, `YYYY-MM-DDThh:mmZ` |
 | `hw` | Board, from `CONFIG_TRACKER_HW_REVISION` |
 
 Four things a reader needs to know:
 
-- **`charge` is not the same as `vbus`.** They come from different PMIC registers:
-  `charge` is what the charger is doing, `vbus` is whether a supply is attached. A
-  completed charge on a live lead is `vbus: true, charge: 2`. Read "plugged in" from
-  `vbus` — that is what it was added for.
+- **`wdt` is optional; everything else is always present.** A reader must treat a
+  missing `wdt` as `0`, not as malformed. It is the only key that can be absent.
+- **`charge` doubles as the plugged-in flag.** `1` (charging) and `2` (complete) both
+  mean a supply is attached; `0` normally means running on the battery. There was a
+  separate `vbus` field for this and it was removed as redundant. The one case the two
+  would disagree is a live lead with the charger idle for some reason other than
+  completion — thermal fold-back, or the charger disabled — which reads `charge: 0`
+  while externally powered. Firmware still decides everything internally from
+  `power_vbus_present()`, so only the reported view is affected.
 - **`wake` describes the cycle, not the report.** Every report in a
   [motion surge](#wake-on-motion) is tagged `"motion"`, including the ones sent after
   external power arrives — that is what makes the surge identifiable as a single event.
@@ -437,9 +442,12 @@ RAM, so the value survives; `watchdog_init()` latches it, logs it, and it then r
 in `wdt` on every subsequent report until the next reset. It is sticky rather than
 one-shot so you can read it off any record, not just the one tagged `"wake": "boot"`.
 
+After a clean boot the phase is 0 and the field is **omitted entirely**, so its presence
+alone means "the last reset was not clean".
+
 | `wdt` | Phase | | `wdt` | Phase |
 |---|---|---|---|---|
-| 0 | clean boot, or marker not retained | | 7 | building/sending a report |
+| 0 | clean boot (field omitted), or marker not retained | | 7 | building/sending a report |
 | 1 | top of the loop | | 8 | powered / surge report loop |
 | 2 | `lte_ensure_connected()` | | 9 | `gnss_stop()`, incl. the UART suspend |
 | 3 | `cloud_resume()` | | 10 | `cloud_pause()` |
@@ -450,7 +458,7 @@ one-shot so you can read it off any record, not just the one tagged `"wake": "bo
 The numbers are sent raw and matched against `enum tracker_phase` in
 [src/watchdog.h](src/watchdog.h) by hand, so only ever **append** to that enum.
 
-**Verify retention before trusting it.** A `wdt` of 0 means either "the last boot was
+**Verify retention before trusting it.** A missing `wdt` means either "the last boot was
 clean" or "`.noinit` did not survive" — the linkage is right (the markers land above
 `__bss_end`), but nothing here proves TF-M leaves non-secure RAM alone across a reset.
 The boot log distinguishes the two: `Restarted from phase N (name)` versus `Cold boot, no
@@ -465,8 +473,8 @@ member:
 ```json
 {"appId":"GPSTRACKER","messageType":"DATA","ts":1754035200000,
  "data":{"coords": [151.2, -33.8], "hdop": 1.20, "batt": 87, "volt": 4010,
-         "charge": 0, "signal": -85, "awake": 43, "vbus": false,
-         "wake": "timer", "fw": "2026-08-02T17:51Z", "hw": "feather-nrf9151"}}
+         "charge": 0, "signal": -85, "awake": 43, "wake": "timer",
+         "fw": "2026-08-02T17:51Z", "hw": "feather-nrf9151"}}
 ```
 
 The web app polls nRF Cloud instead of the Hologram Data Engine and reads
