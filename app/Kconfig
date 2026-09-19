@@ -2,12 +2,320 @@
 
 mainmenu "GPS Tracker"
 
+config TRACKER_CLOUD_PROVIDER
+	string "Telemetry cloud provider: \"nrfcloud\" or \"hologram\""
+	default "nrfcloud"
+	help
+	  Where telemetry reports are published. Both providers send the same
+	  payload from telemetry_build_json(), so the web app's schema is
+	  unchanged either way - only the envelope around it and the backend's
+	  polling endpoint differ.
+
+	  "nrfcloud" is CoAP over DTLS and requires per-device credentials in the
+	  modem key store; see the README for the one-time provisioning steps. It
+	  is also the only provider that can serve A-GNSS assistance.
+
+	  "hologram" is the Embedded Cloud Socket over plain TCP and needs an
+	  8-character Data Engine device key, which Hologram does not issue for
+	  Hyper-provisioned SIMs.
+
+	  Changing this one line is the whole switch: every provider-specific
+	  option below and in prj.conf stays valid either way.
+
+config TRACKER_CLOUD_NRF
+	bool
+	default y if TRACKER_CLOUD_PROVIDER = "nrfcloud"
+
+config TRACKER_CLOUD_HOLOGRAM
+	bool
+	default y if TRACKER_CLOUD_PROVIDER = "hologram"
+
+config TRACKER_CLOUD_NRF_LIB
+	bool
+	default y
+	select NRF_CLOUD
+	select NRF_CLOUD_COAP
+	select NRF_CLOUD_CHECK_CREDENTIALS
+	select MODEM_JWT
+	select MODEM_KEY_MGMT
+	select DATE_TIME
+	select NETWORKING
+	select NET_SOCKETS
+	select NET_SOCKETS_OFFLOAD
+	select NET_IPV4
+	help
+	  Hidden, and deliberately unconditional: the nRF Cloud stack is pulled in
+	  whichever provider is selected, so that every CONFIG_NRF_CLOUD_*,
+	  CONFIG_COAP_* and CONFIG_DATE_TIME* line in prj.conf remains a valid
+	  assignment. Zephyr aborts the build on a handwritten assignment that
+	  does not take effect, so without this a "hologram" build would need its
+	  own conf file. Only cloud_nrf.c or cloud_hologram.c is compiled (see
+	  CMakeLists.txt), and --gc-sections drops the unreferenced library code
+	  from a Hologram image.
+
+config TRACKER_NRF_CLOUD_APP_ID
+	string "appId reported in the nRF Cloud device message envelope"
+	default "GPSTRACKER"
+	help
+	  Deliberately not "GNSS": nRF Cloud's built-in GNSS card expects
+	  {lat,lon,acc,alt,spd,hdg}, which is not this tracker's schema. A custom
+	  appId keeps our payload out of that card and lets the backend filter
+	  /v1/messages by appId.
+
+config TRACKER_NRF_CLOUD_PORTAL_LOCATION
+	bool "Also send position in nRF Cloud's native format"
+	help
+	  Sends a second, standard GNSS message per report so the device shows up
+	  on the nRF Cloud portal's map. Useful when debugging in the field
+	  without the web app, at roughly double the messages and data.
+
+config TRACKER_CLOUD_CONNECT_BUDGET_SECONDS
+	int "Watchdog budget for a cloud connect or resume (seconds)"
+	default 240
+	help
+	  A cold connect is a DTLS handshake (up to 123 s) plus an authentication
+	  exchange, during which the main thread is blocked and cannot feed the
+	  watchdog itself. Must exceed that worst case but stay under the
+	  watchdog timeout.
+
+config TRACKER_MODEM_TIME_WAIT_SECONDS
+	int "Bounded wait for modem network time before the first connect (seconds)"
+	default 60
+	help
+	  The JWT used to authenticate is signed by the modem, which needs network
+	  time. On a cold boot that can lag registration by a few seconds.
+
+config TRACKER_AGNSS
+	bool "Fetch A-GNSS assistance from nRF Cloud"
+	default y
+	select NRF_CLOUD_AGNSS
+	select MODEM_INFO
+	select MODEM_INFO_ADD_NETWORK
+	help
+	  Downloads ephemerides, almanac, time and a coarse position and injects
+	  them into the onboard GNSS. Requested proactively when the modem signals
+	  it has no valid assistance (cold start), and as a fallback when a fix
+	  attempt times out. Typically cuts time-to-first-fix from over a minute
+	  to a few seconds, which mostly shows up as battery life.
+
+	  Only ever applies to the onboard receiver, and only when the provider is
+	  "nrfcloud" - both are runtime checks (see agnss_wanted() in main.c), so
+	  this stays selectable regardless. With an external GNSS module doing the
+	  acquiring it matters only on the fallback path.
+
+# These two shape the main report loop rather than the assistance module, so
+# they stay defined even when TRACKER_AGNSS is off - main.c references them
+# unconditionally and lets the compiler drop the dead branches.
+
+config TRACKER_AGNSS_PROACTIVE_WAIT_SECONDS
+	int "How long to wait after GNSS start for an assistance request (seconds)"
+	default 5
+	help
+	  The modem raises its request within a second or two of starting, and
+	  only when it actually lacks data - so this doubles as a cold-start
+	  test. A warm receiver never fires it and the wait costs nothing.
+	  Ignored unless TRACKER_AGNSS is enabled.
+
+config TRACKER_AGNSS_FIX_TIMEOUT_SECONDS
+	int "Fix window after assistance was injected (seconds)"
+	default 90
+	help
+	  Only used for the retry following a timed-out fix attempt. With valid
+	  assistance a fix normally lands in seconds, so this is mostly a bound
+	  on "the sky is genuinely not visible". Ignored unless TRACKER_AGNSS is
+	  enabled.
+
+if TRACKER_AGNSS
+
+config TRACKER_AGNSS_BUDGET_SECONDS
+	int "Watchdog budget for the assistance download and injection (seconds)"
+	default 180
+
+config TRACKER_AGNSS_MIN_INTERVAL_SECONDS
+	int "Minimum interval between assistance downloads (seconds)"
+	default 1800
+	help
+	  Assistance stays useful for hours, so refetching on every failed cycle
+	  would just burn data. Guards against a covered antenna turning into a
+	  download every nine minutes.
+
+config TRACKER_AGNSS_STOP_GNSS_DURING_FETCH
+	bool "Stop the GNSS receiver while downloading assistance"
+	default y
+	help
+	  In LTE-M/GPS coexistence the modem time-shares one radio, so a searching
+	  receiver slows the download that would have helped it. Injection is
+	  still legal while stopped - it only needs GNSS enabled in the functional
+	  mode, not running.
+
+config TRACKER_AGNSS_FULL_REQUEST_FALLBACK
+	bool "Request the full assistance set if the modem has not asked yet"
+	default y
+	help
+	  nRF Cloud's CoAP API requires an explicit list of what to send, which
+	  normally comes from the modem's own request. This synthesises a
+	  request-everything frame for the case where assistance is wanted before
+	  the modem has asked for any.
+
+endif # TRACKER_AGNSS
+
+config TRACKER_MOTION_WAKE
+	bool "Wake from the battery sleep on a jolt (onboard accelerometer)"
+	depends on DT_HAS_ST_LIS2DH_ENABLED
+	default y
+	help
+	  Uses the LIS2DH's any-motion interrupt so a tow, an impact, or someone
+	  getting in pulls the tracker out of its nine-minute sleep immediately
+	  instead of going unreported until the next scheduled wake. The sensor
+	  raises the interrupt itself, so nothing has to stay awake polling it.
+
+	  On a jolt the tracker reports every TRACKER_CHARGING_INTERVAL_SECONDS -
+	  the same cadence it uses on external power - until either power turns up
+	  (it was you getting in the car, and normal powered operation just
+	  continues) or TRACKER_MOTION_SURGE_SECONDS pass with no further movement.
+
+	  Needs CONFIG_LIS2DH_TRIGGER_GLOBAL_THREAD=y and
+	  CONFIG_LIS2DH_ACCEL_HP_FILTERS=y in prj.conf; those live in a Kconfig
+	  choice and a driver menu that cannot be selected from here, so motion.c
+	  fails the build with a pointer to them if they are missing.
+
+if TRACKER_MOTION_WAKE
+
+config TRACKER_MOTION_THRESHOLD_MG
+	int "Jolt threshold (milli-g)"
+	default 350
+	range 16 2000
+	help
+	  How hard the tracker has to be shaken before it wakes. Applied to each
+	  axis after a high-pass filter, so this is a change in acceleration, not
+	  a total - gravity does not count towards it.
+
+	  350 mg trips on a door slam, someone climbing in, or a tow hookup, but
+	  not on wind or a passing truck. Lower catches gentle handling at the
+	  cost of more false alarms, which are cheap here: applying power ends the
+	  surge immediately. The upper bound is the 2 g full scale the driver is
+	  configured for, and the hardware step is about 16 mg.
+
+config TRACKER_MOTION_DURATION_SAMPLES
+	int "Samples the threshold must be exceeded for"
+	default 2
+	range 0 127
+	help
+	  Debounce, counted in accelerometer samples, so the wall-clock time is
+	  this divided by TRACKER_MOTION_ODR_HZ - 40 ms at the defaults. 0 fires on
+	  the first sample over the line, which also means a single noisy sample
+	  wakes the tracker; a couple of samples rejects those while a real jolt,
+	  which rings for a good fraction of a second, still gets through.
+
+	  Only useful if the ODR is high enough for a few samples to be a short
+	  time. At 10 Hz the smallest debounce available is 100 ms, which is long
+	  enough to miss a sharp impact entirely.
+
+config TRACKER_MOTION_ODR_HZ
+	int "Accelerometer output data rate while armed (Hz)"
+	default 50
+	help
+	  The rate the sensor samples at: how quickly a jolt is noticed, how fine
+	  the TRACKER_MOTION_DURATION_SAMPLES debounce can be, and how much current
+	  is drawn across a nine-minute sleep. Must be one of the rates the LIS2DH
+	  supports: 1, 10, 25, 50, 100, 200 or 400.
+
+	  50 Hz costs single-digit microamps and puts five samples inside a 100 ms
+	  event, which is what makes a debounce worth having. Dropping to 10 Hz
+	  saves a little current but samples only every 100 ms, so short impacts
+	  can fall between samples.
+
+config TRACKER_MOTION_HP_CUTOFF
+	int "High-pass filter cutoff selector (0-3)"
+	default 2
+	range 0 3
+	help
+	  The HPCF field of the LIS2DH's CTRL2. Per the datasheet the cutoff is a
+	  fraction of the output data rate: 0 = ODR/50, 1 = ODR/100, 2 = ODR/200,
+	  3 = ODR/400.
+
+	  Because it tracks the ODR, raising TRACKER_MOTION_ODR_HZ also raises the
+	  cutoff and filters out more slow movement. The default pairs with 50 Hz
+	  to put the corner near 0.25 Hz, roughly where it sat at 10 Hz and
+	  ODR/50 - low enough that gravity is still removed, high enough that a
+	  slow push or rock of the car still registers.
+
+	  Raise the selector (lower cutoff) if slow movement is being missed; lower
+	  it if slow drift is causing false wakes.
+
+endif # TRACKER_MOTION_WAKE
+
+# These two shape the main report loop rather than the motion module, so they
+# stay defined even when TRACKER_MOTION_WAKE is off - main.c references them
+# unconditionally and lets the compiler drop the dead branches. Same reasoning
+# as the two A-GNSS timings above.
+
+config TRACKER_MOTION_SETTLE_CYCLES
+	int "Battery sleeps to let pass after losing power before arming motion"
+	default 1
+	range 0 20
+	help
+	  Losing external power means the engine just stopped, which is the exact
+	  moment someone is collecting their things and slamming doors. Arming the
+	  jolt interrupt straight away turns every trip you take into a ten-minute
+	  surge. This delays it by whole wake cycles instead.
+
+	  0 arms on the first sleep after power is lost. 1 finishes the cycle,
+	  sleeps TRACKER_SLEEP_SECONDS unarmed, wakes and reports as usual, and
+	  arms before the sleep after that - so roughly nine minutes of grace,
+	  which is comfortably longer than it takes to walk away from a car.
+
+	  The count restarts whenever external power is seen again, so every
+	  unplug gets the full delay. It does not restart on a reset: a tracker
+	  that reboots while parked arms on its first sleep rather than leaving
+	  the car unwatched for another cycle.
+
+	  The cost is that the car is genuinely unwatched for that long after you
+	  park. Set 0 if that matters more than the false surges.
+
+config TRACKER_MOTION_SURGE_SECONDS
+	int "How long frequent reporting continues after a jolt (seconds)"
+	default 600
+	help
+	  Measured from the most recent jolt, not from the first, so a tow in
+	  progress keeps reporting for as long as it is being moved while a
+	  one-off false alarm times out on schedule.
+
+	  Long enough to be useful if the car is being taken, short enough that a
+	  false alarm does not cost much battery. Note there is no upper bound on
+	  a surge that keeps being extended. Ignored unless TRACKER_MOTION_WAKE is
+	  enabled.
+
+config TRACKER_HW_REVISION
+	string "Hardware revision reported in the telemetry \"hw\" field"
+	default "feather-nrf9151"
+	help
+	  Identifies the board this firmware is running on, since nothing in the
+	  image can work that out at runtime. Paired with the "fw" field, which
+	  is the UTC build time stamped in by cmake/build_stamp.cmake, this lets
+	  the backend tell later which combination produced a record - the field
+	  the Dash-era data never had and had to be inferred from dates.
+
+	  Sent verbatim on every report, so keep it short: telemetry_build_json()
+	  is bounded at 256 bytes and a long string here eats that budget.
+
+config TRACKER_WATCHDOG_MARGIN_SECONDS
+	int "Watchdog margin above TRACKER_SLEEP_SECONDS (seconds)"
+	default 300
+	help
+	  The hardware watchdog keeps counting through the battery sleep, so its
+	  timeout is the sleep plus this margin. The margin must cover the whole
+	  awake portion of a cycle: LTE registration, a cloud connect, both fix
+	  windows and an assistance download.
+
 config HOLOGRAM_DEVICE_KEY
-	string "Hologram device key (8-character 'Receive from Device' key)"
+	string "Hologram device key (8-character 'SIM Key')"
 	default "CHANGEME"
 	help
-	  Per-device key from the Hologram dashboard (Device page -> Receive from
-	  Device). Used to authenticate to the Embedded Cloud Socket API.
+	  Per-device key used to authenticate to the Embedded Cloud Socket API.
+	  On the dashboard: open the device, Webhooks tab, Webhook key section,
+	  "Show key" next to SIM Key. It is not the numeric device ID shown under
+	  Device Details, nor the account-wide REST API key.
 
 config HOLOGRAM_HOST
 	string "Hologram Cloud Socket hostname"
@@ -33,12 +341,92 @@ config TRACKER_CHARGING_INTERVAL_SECONDS
 	default 60
 
 config TRACKER_GNSS_FIX_TIMEOUT_SECONDS
-	int "Maximum time to wait for a GNSS fix (seconds)"
+	int "Maximum time to wait for an onboard GNSS fix (seconds)"
 	default 120
 
 config TRACKER_GNSS_EXTRA_FIX_SECONDS
 	int "Extra time to keep GNSS running after first fix for better accuracy"
 	default 5
+
+config TRACKER_GNSS_EXTERNAL
+	bool "Use an external NMEA GNSS module (Adafruit Ultimate GPS v3)"
+	default y
+	select GNSS
+	select PM_DEVICE
+	select GPIO
+	help
+	  Takes position from a UART GNSS module instead of the modem's own
+	  receiver, because the onboard one does not acquire fast enough in
+	  practice even with A-GNSS. The module must appear in devicetree as a
+	  "gnss-nmea-generic" node labelled gnss_ext on an enabled UART - see
+	  boards/circuitdojo_feather_nrf9151_ns.overlay.
+
+	  The onboard receiver stays compiled in as a fallback, so this is not an
+	  either/or: see TRACKER_GNSS_EXT_MODEM_FALLBACK.
+
+if TRACKER_GNSS_EXTERNAL
+
+config TRACKER_GNSS_EXT_POWER_PIN
+	int "GPIO0 pin driving the GNSS module's power FET (high = powered)"
+	default 13
+	range 0 31
+	help
+	  The N-FET gate. Held low so the module draws nothing until a report
+	  cycle needs a fix. This is a Kconfig value rather than a devicetree
+	  gpios property - unlike every other pin on this board - purely so the
+	  wiring can be changed in one place with the rest of the tracker's
+	  settings.
+
+	  Pins 1-8, 10-12, 19 and 23-25 are already taken by the board (i2c2,
+	  button, spi3, PMIC interrupt, uart0, accelerometer interrupts, uart1
+	  and pwm0). Set this to match your actual wiring before flashing.
+
+config TRACKER_GNSS_EXT_WARMUP_MS
+	int "Delay after powering the module before reading NMEA (milliseconds)"
+	default 500
+	help
+	  The receiver needs a moment to boot and start emitting sentences.
+	  Opening the UART earlier only gives the parser garbage to discard, and
+	  the wait is paid once per wake cycle.
+
+config TRACKER_GNSS_EXT_FIX_TIMEOUT_SECONDS
+	int "Maximum time to wait for an external GNSS fix (seconds)"
+	default 60
+	help
+	  Deliberately shorter than TRACKER_GNSS_FIX_TIMEOUT_SECONDS: with the
+	  backup cell keeping ephemerides alive across the power cut, a warm start
+	  lands in seconds. If it has not locked by the end of this window, the
+	  onboard receiver plus assistance is a better bet than waiting longer.
+
+config TRACKER_GNSS_EXT_UERE_METERS
+	int "Assumed user-equivalent range error for the accuracy estimate (metres)"
+	default 3
+	help
+	  NMEA carries no position accuracy figure, so it is approximated as HDOP
+	  times this. Only used for the optional nRF Cloud portal location message,
+	  which requires the field; the telemetry payload does not carry accuracy.
+
+config TRACKER_GNSS_EXT_POWER_CYCLE
+	bool "Cut module power between report cycles"
+	default y
+	help
+	  Opens the FET for the duration of the battery sleep, which is where
+	  nearly all of the module's ~25 mA would otherwise go. Safe to leave on
+	  when the CR1220 backup cell is fitted: the module keeps its RTC and
+	  ephemerides, so the next wake is a warm start rather than a ~34 s cold
+	  one. Turn this off if there is no backup cell and cold starts are
+	  costing more than the module's running current.
+
+config TRACKER_GNSS_EXT_MODEM_FALLBACK
+	bool "Fall back to the onboard receiver when the module does not lock"
+	default y
+	help
+	  After TRACKER_GNSS_EXT_FIX_TIMEOUT_SECONDS with no fix, power the module
+	  down and give the rest of the cycle to the modem's GNSS, with A-GNSS
+	  assistance if the provider can serve it. Covers a disconnected antenna
+	  or a dead module at the cost of a longer awake time on those cycles.
+
+endif # TRACKER_GNSS_EXTERNAL
 
 config TRACKER_LTE_CONNECT_TIMEOUT_SECONDS
 	int "Bounded LTE connection attempt timeout (seconds)"
@@ -46,6 +434,35 @@ config TRACKER_LTE_CONNECT_TIMEOUT_SECONDS
 	help
 	  On failure the tracker sleeps TRACKER_SLEEP_SECONDS and retries, rather
 	  than blocking forever (mirrors the original 'sleep 9 min, try again').
+
+config TRACKER_MODEM_RECOVERY_MINUTES
+	int "Silence before restarting the modem (minutes)"
+	default 30
+	help
+	  How long nothing may reach the cloud before the tracker drops the modem
+	  to offline and back, restarting the attach from scratch.
+
+	  The watchdog only catches a cycle that never ends. The opposite failure -
+	  cycles that end promptly and achieve nothing - feeds it on every pass and
+	  so runs forever: a modem wedged such that lte_lc_connect_async() returns
+	  an error immediately gives wake, fail, flash red, sleep, repeat, until
+	  somebody presses reset. This is what notices that instead.
+
+	  Measured from the last report that was actually accepted, not from the
+	  last attempt, so a run of failures accumulates rather than resetting.
+
+config TRACKER_REBOOT_MINUTES
+	int "Silence before rebooting outright (minutes)"
+	default 120
+	help
+	  The backstop, for when restarting the modem was not enough. Reports after
+	  the restart carry "wdt": 14, so a self-reboot is distinguishable from a
+	  watchdog reset and from someone pressing the button.
+
+	  Must be comfortably larger than TRACKER_MODEM_RECOVERY_MINUTES so the
+	  cheaper remedy gets a fair chance first. Note that genuine dead spots -
+	  an underground car park over a weekend - will reboot on this interval;
+	  that is wasteful but harmless, and the alternative is staying wedged.
 
 config TRACKER_STATUS_LED
 	bool "RGB status LED (red = no LTE, yellow = LTE only, green = LTE + fix)"
@@ -80,16 +497,51 @@ config TRACKER_STATUS_LED_BLINK_MS
 	default 500
 	range 50 10000
 	help
-	  The status colour blinks at this rate while the battery is charging and
-	  goes solid once the charge completes (or on battery). Driven from the
-	  system workqueue, since the PMIC LED sinks have no hardware blink.
+	  Half-period of the symmetric blink shown while externally powered and
+	  charging, so the default is a 1 Hz blink. Driven from the system
+	  workqueue, since the PMIC LED sinks have no hardware blink.
+
+config TRACKER_STATUS_LED_FLASH_ON_MS
+	int "On time of the on-battery flash (milliseconds)"
+	default 50
+	range 20 10000
+
+config TRACKER_STATUS_LED_FLASH_OFF_MS
+	int "Off time of the on-battery flash (milliseconds)"
+	default 1950
+	range 100 60000
+	help
+	  Together with TRACKER_STATUS_LED_FLASH_ON_MS this is the "running on
+	  battery" pattern - by default a 100 ms flash every 2 s. Deliberately a
+	  low duty cycle rather than a symmetric blink: unlike the charging blink
+	  this one is paid for out of the battery it is reporting on. A short
+	  flash on a short period gives more chances to catch it while costing
+	  less than a longer one on a longer period.
+
+config TRACKER_STATUS_LED_FULL_PERCENT
+	int "State of charge at or above which the battery counts as full (percent)"
+	default 95
+	range 50 100
+	help
+	  Only a solid LED means "externally powered and full", so this is what
+	  separates solid from the charging blink. The percentage comes from
+	  telemetry_battery_percent(), i.e. interpolated from battery voltage.
+
+	  The PMIC's own charge-complete flag also counts as full when it is set,
+	  but a threshold is wanted regardless: it is a definition the tracker
+	  controls, rather than one that depends on whether a charge cycle
+	  happened to run and terminate.
 
 config TRACKER_STATUS_LED_ON_BATTERY
-	bool "Keep the LED lit while sleeping on battery"
+	bool "Keep flashing while sleeping on battery"
 	help
-	  By default the LED is blanked for the duration of a battery sleep and only
-	  lit while the tracker is awake, since the sink draws ~5 mA. Enable this to
-	  keep the last state visible continuously at the cost of battery life.
+	  By default the LED is blanked for the duration of a battery sleep and
+	  only flashes while the tracker is awake. Enable this to carry the
+	  on-battery flash through the sleep as a continuous sign of life.
+
+	  The sink draws ~5 mA lit, so at the default 100 ms in 2 s that averages
+	  ~0.25 mA - small in absolute terms but well above what the tracker
+	  otherwise draws asleep, so it will dominate standby battery life.
 
 endif # TRACKER_STATUS_LED
 

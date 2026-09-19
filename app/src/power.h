@@ -28,8 +28,14 @@ int power_init(void);
  *
  * Used to decide between the frequent "charging" report loop and the long
  * battery sleep, replacing the original getChargeState() plugged-in check.
+ * Not reported directly: telemetry carries @ref tracker_charge_state instead,
+ * where 1 and 2 both imply external power.
+ *
+ * Deliberately not named power_is_charging(): this is the supply, not the
+ * charger. A full battery on a live USB lead is VBUS present with a charge
+ * state of TRACKER_CHARGE_DISCHARGING, and the two must not be conflated.
  */
-bool power_is_charging(void);
+bool power_vbus_present(void);
 
 /**
  * @brief Read just the charge state.
@@ -48,14 +54,8 @@ enum tracker_charge_state power_charge_state(void);
  */
 int power_read(uint16_t *batt_mv, enum tracker_charge_state *charge_state);
 
-/**
- * @brief Interruptible sleep: sleep for @p seconds, or wake early if external
- *        power is connected.
- *
- * Replaces the original PWR_SENS rising-edge wakeup.
- *
- * @return true if woken early by VBUS connect, false if the full time elapsed.
+/* Interruptible sleep lives in wake.h: external power is only one of the two
+ * things that can end one, so the wait belongs with neither producer.
  */
-bool power_wait_interruptible(uint32_t seconds);
 
 #endif /* GPS_TRACKER_POWER_H_ */

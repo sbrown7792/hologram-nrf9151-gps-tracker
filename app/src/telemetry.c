@@ -9,6 +9,11 @@
 #include <errno.h>
 #include <stdio.h>
 
+/* Generated at build time by cmake/build_stamp.cmake. */
+#include <tracker_build_stamp.h>
+
+#include "watchdog.h"
+
 /* A point in a battery discharge curve. */
 struct battery_level_point {
 	uint16_t lvl_pptt; /* remaining capacity, parts-per-ten-thousand */
@@ -58,13 +63,32 @@ uint8_t telemetry_battery_percent(uint16_t batt_mv)
 
 int telemetry_build_json(const struct tracker_telemetry *t, char *buf, size_t len)
 {
+	/* Rendered separately because it is omitted entirely on a clean boot:
+	 * "wdt" is a post-mortem, and phase 0 is the absence of one. Costing
+	 * every healthy record ten bytes to say "nothing happened" is the wrong
+	 * trade on a metered cellular link.
+	 */
+	enum tracker_phase phase = watchdog_reset_phase();
+	char wdt[16] = "";
+
+	if (phase != TRACKER_PHASE_NONE) {
+		(void)snprintf(wdt, sizeof(wdt), "\"wdt\": %d, ", (int)phase);
+	}
+
+	/* fw/hw are build identity rather than measurements, so they come
+	 * straight from the build rather than through struct tracker_telemetry -
+	 * there is then no way for a caller to forget to fill them in.
+	 */
 	int n = snprintf(buf, len,
 			 "{\"coords\": [%.6f, %.6f], \"hdop\": %.2f, "
 			 "\"batt\": %u, \"volt\": %u, \"charge\": %d, "
-			 "\"signal\": %d, \"awake\": %u}",
+			 "\"signal\": %d, \"awake\": %u, \"wake\": \"%s\", "
+			 "%s\"fw\": \"%s\", \"hw\": \"%s\"}",
 			 t->longitude, t->latitude, (double)t->hdop,
 			 telemetry_battery_percent(t->batt_mv), t->batt_mv,
-			 (int)t->charge, t->signal_dbm, t->awake_s);
+			 (int)t->charge, t->signal_dbm, t->awake_s,
+			 wake_reason_name(t->wake), wdt, TRACKER_BUILD_STAMP,
+			 CONFIG_TRACKER_HW_REVISION);
 
 	if (n < 0 || (size_t)n >= len) {
 		return -ENOMEM;

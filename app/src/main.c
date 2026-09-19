@@ -2,9 +2,10 @@
  * GPS Tracker for the CircuitDojo nRF9151 Feather.
  *
  * Port of the original Hologram Dash sketch (../gps_tracker/gps_tracker.ino):
- *   - acquire a GNSS fix,
+ *   - acquire a GNSS fix, from an external NMEA module where one is fitted and
+ *     otherwise (or on fallback) from the modem's own receiver,
  *   - build the same telemetry JSON the web app expects,
- *   - push it into the Hologram Data Engine via the Cloud Socket API,
+ *   - push it to the configured cloud provider (see cloud.h),
  *   - report every ~60 s while externally powered, otherwise sleep ~9 min,
  *   - wake early from the battery sleep when external power is applied,
  *   - hardware watchdog as a safety reset,
@@ -16,21 +17,32 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/reboot.h>
 
 #include <modem/lte_lc.h>
 #include <modem/modem_info.h>
 #include <modem/nrf_modem_lib.h>
 
+#include "agnss.h"
+#include "cloud.h"
 #include "gnss.h"
-#include "hologram.h"
+#include "motion.h"
 #include "power.h"
 #include "status_led.h"
 #include "telemetry.h"
+#include "wake.h"
 #include "watchdog.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 static K_SEM_DEFINE(lte_connected_sem, 0, 1);
+
+/* Uptime of the last report that actually reached the cloud; 0 means "not since
+ * boot", which the arithmetic in recover_if_silent() handles for free. Declared
+ * up here because report_fix() sets it well before that function is defined.
+ */
+static int64_t last_send_uptime;
+static bool modem_bounced;
 
 static void lte_handler(const struct lte_lc_evt *const evt)
 {
@@ -88,10 +100,83 @@ static int lte_ensure_connected(void)
 	return 0;
 }
 
+/* Whether a motion surge is still running.
+ *
+ * Measured from the *last* jolt rather than from the wake, so a tow in progress
+ * keeps the tracker reporting for as long as it is being moved, while a one-off
+ * false alarm - getting into the car - times out on schedule.
+ */
+static bool surge_active(bool motion_cycle)
+{
+	if (!motion_cycle || !IS_ENABLED(CONFIG_TRACKER_MOTION_WAKE)) {
+		return false;
+	}
+
+	int64_t last = motion_last_event_uptime();
+
+	return last != 0 &&
+	       (k_uptime_get() - last) < (CONFIG_TRACKER_MOTION_SURGE_SECONDS * 1000LL);
+}
+
+/* Whether an A-GNSS fetch is worth attempting right now. Assistance is injected
+ * into the modem, so it is only useful while the onboard receiver is the one
+ * running - and only nRF Cloud can serve it, so a "hologram" build never gets
+ * past this even with CONFIG_TRACKER_AGNSS compiled in.
+ */
+static bool agnss_wanted(void)
+{
+	return IS_ENABLED(CONFIG_TRACKER_AGNSS) && !IS_ENABLED(CONFIG_TRACKER_SKIP_LTE) &&
+	       gnss_active_source() == TRACKER_FIX_SOURCE_MODEM && cloud_supports_agnss() &&
+	       cloud_is_ready();
+}
+
 /* Refresh the status LED: colour from connectivity, blink while charging. In
  * GNSS-only bench mode there is no network by design, so treat the LTE side as
  * satisfied and let the colour track GNSS alone.
  */
+#if defined(CONFIG_TRACKER_STATUS_LED)
+
+/* Solid means externally powered and full, and nothing else - so the LED can be
+ * read at a glance without knowing what the tracker is up to.
+ */
+static enum tracker_led_pattern led_pattern(void)
+{
+	if (!power_vbus_present()) {
+		return TRACKER_LED_BATTERY;
+	}
+
+	uint16_t batt_mv;
+	enum tracker_charge_state charge;
+
+	if (power_read(&batt_mv, &charge) != 0) {
+		/* Unknown: show it as still charging rather than claiming full. */
+		return TRACKER_LED_CHARGING;
+	}
+
+	/* State of charge is the definition of "full" here; the PMIC's own
+	 * charge-complete flag is accepted too, as an independent signal that
+	 * cannot be wrong when it is set.
+	 */
+	if (charge == TRACKER_CHARGE_FULL ||
+	    telemetry_battery_percent(batt_mv) > CONFIG_TRACKER_STATUS_LED_FULL_PERCENT) {
+		return TRACKER_LED_SOLID;
+	}
+
+	return TRACKER_LED_CHARGING;
+}
+
+#else /* !CONFIG_TRACKER_STATUS_LED */
+
+/* The LED calls are no-op inlines without the LED, but the argument still has to
+ * compile, and TRACKER_STATUS_LED_FULL_PERCENT does not exist in that build.
+ */
+static inline enum tracker_led_pattern led_pattern(void)
+{
+	return TRACKER_LED_SOLID;
+}
+
+#endif /* CONFIG_TRACKER_STATUS_LED */
+
 static void status_led_report(bool have_fix)
 {
 	bool lte = IS_ENABLED(CONFIG_TRACKER_SKIP_LTE) || lte_is_registered();
@@ -99,25 +184,30 @@ static void status_led_report(bool have_fix)
 	status_led_set(!lte	    ? TRACKER_STATUS_NO_LTE :
 		       have_fix	    ? TRACKER_STATUS_LTE_FIX :
 				      TRACKER_STATUS_LTE_NO_FIX);
-	status_led_charging(power_charge_state() == TRACKER_CHARGE_CHARGING);
+	status_led_pattern(led_pattern());
 }
 
 /* Build telemetry from a fix and send it. Returns 0 if the report was sent.
- * A NULL @p pvt reports position 0,0 with hdop 0 - used by
+ * A NULL @p fix reports position 0,0 with hdop 0 - used by
  * TRACKER_FORCE_PUBLISH_WITHOUT_FIX when GNSS never locked but the rest of the
  * telemetry (battery, signal, awake time) is still worth sending.
  */
-static int report_fix(const struct nrf_modem_gnss_pvt_data_frame *pvt,
-		      uint32_t wake_uptime_ms)
+static int report_fix(const struct tracker_fix *fix, uint32_t wake_uptime_ms,
+		      enum tracker_wake_reason wake_reason)
 {
 	struct tracker_telemetry t = {
-		.longitude = pvt ? pvt->longitude : 0.0,
-		.latitude = pvt ? pvt->latitude : 0.0,
-		.hdop = pvt ? pvt->hdop : 0.0f,
+		.longitude = fix ? fix->longitude : 0.0,
+		.latitude = fix ? fix->latitude : 0.0,
+		.hdop = fix ? fix->hdop : 0.0f,
 		.awake_s = (uint32_t)((k_uptime_get() - wake_uptime_ms) / 1000),
+		.wake = wake_reason,
 	};
 
 	if (power_read(&t.batt_mv, &t.charge)) {
+		/* batt_mv 0 with charge 0 is the "PMIC unreadable" signature, not a
+		 * flat battery on no charger - the two are worth telling apart at
+		 * the far end.
+		 */
 		t.batt_mv = 0;
 		t.charge = TRACKER_CHARGE_DISCHARGING;
 	}
@@ -128,19 +218,132 @@ static int report_fix(const struct nrf_modem_gnss_pvt_data_frame *pvt,
 
 	char payload[256];
 
+	watchdog_phase(TRACKER_PHASE_REPORT);
+
 	if (telemetry_build_json(&t, payload, sizeof(payload)) < 0) {
 		LOG_ERR("Telemetry payload too large");
 		return -ENOMEM;
 	}
 
-	int err = hologram_send(payload);
+	int err = cloud_send_telemetry(payload);
+
+	if (err == -EACCES || err == -ENOTCONN) {
+		/* The session can age out server-side while we sleep. Re-establish
+		 * once and retry before writing the cycle off.
+		 */
+		LOG_INF("Cloud link stale, reconnecting for this report");
+		watchdog_guard_start(CONFIG_TRACKER_CLOUD_CONNECT_BUDGET_SECONDS);
+		err = cloud_resume();
+		watchdog_guard_stop();
+
+		if (!err) {
+			err = cloud_send_telemetry(payload);
+		}
+	}
 
 	if (err) {
-		LOG_ERR("Hologram send failed (err %d)", err);
+		LOG_ERR("Telemetry send failed (err %d)", err);
+	} else {
+		last_send_uptime = k_uptime_get();
+	}
+
+	if (!err && fix != NULL) {
+		/* Optional, off by default: makes the fix visible on the cloud
+		 * provider's own map view. Never sent for a synthesised 0,0.
+		 */
+		(void)cloud_send_location(fix);
 	}
 
 	watchdog_feed();
 	return err;
+}
+
+/* Uptime of the last report that actually reached the cloud; 0 means "not since
+ * boot", which the arithmetic below handles for free.
+ *
+ * The watchdog covers a cycle that never ends. It cannot see the opposite
+ * failure - cycles that end promptly and achieve nothing - because each one
+ * feeds it on the way past. A modem that has wedged such that
+ * lte_lc_connect_async() fails immediately produces exactly that: wake, fail,
+ * flash red, sleep, forever, with the watchdog perfectly happy. This is the
+ * counterpart that notices.
+ */
+/* Escalating recovery for prolonged silence. Called once per cycle, before the
+ * network is needed, so a restart has the whole cycle to take effect.
+ */
+static void recover_if_silent(void)
+{
+	int64_t quiet_min = (k_uptime_get() - last_send_uptime) / 60000;
+
+	if (quiet_min < CONFIG_TRACKER_MODEM_RECOVERY_MINUTES) {
+		modem_bounced = false;
+		return;
+	}
+
+	if (quiet_min >= CONFIG_TRACKER_REBOOT_MINUTES) {
+		LOG_ERR("Nothing sent for %lld min, rebooting", quiet_min);
+		/* Leaves "wdt": 14 on the reports after the restart, so a
+		 * self-reboot is distinguishable from a watchdog reset and from a
+		 * power-on.
+		 */
+		watchdog_phase(TRACKER_PHASE_NO_NETWORK);
+		k_sleep(K_MSEC(200)); /* let the log drain */
+		sys_reboot(SYS_REBOOT_COLD);
+	}
+
+	if (modem_bounced) {
+		return;
+	}
+
+	/* Cheaper than a reboot and usually enough: drop the modem to offline and
+	 * bring it back, which restarts the attach from scratch.
+	 */
+	LOG_WRN("Nothing sent for %lld min, restarting the modem", quiet_min);
+	modem_bounced = true;
+
+	(void)lte_lc_func_mode_set(LTE_LC_FUNC_MODE_OFFLINE);
+	k_sleep(K_SECONDS(1));
+	(void)lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
+}
+
+/* Battery sleeps taken since external power was last seen, saturating at the
+ * settle threshold. Starts there so a reset while parked arms on the first
+ * sleep: the delay exists to cover someone getting out of the car, and nobody
+ * is getting out of a rebooting tracker.
+ */
+static uint32_t battery_sleeps = CONFIG_TRACKER_MOTION_SETTLE_CYCLES;
+
+/* The battery sleep, shared by the three places that take one.
+ *
+ * Motion is armed here and stays armed until external power turns up, which is
+ * what lets a jolt during the awake part of a cycle still count towards the
+ * surge window. Only VBUS disarms it - see the report loop.
+ */
+static enum tracker_wake_reason battery_sleep(void)
+{
+	bool arm = battery_sleeps >= CONFIG_TRACKER_MOTION_SETTLE_CYCLES;
+
+	watchdog_phase(TRACKER_PHASE_LED_SLEEP);
+	status_led_sleep();
+
+	watchdog_phase(TRACKER_PHASE_MOTION_ARM);
+	motion_set_armed(arm);
+
+	if (!arm) {
+		LOG_INF("Motion wake held off for %u more sleep(s) after losing power",
+			CONFIG_TRACKER_MOTION_SETTLE_CYCLES - battery_sleeps);
+		battery_sleeps++;
+	}
+
+	watchdog_phase(TRACKER_PHASE_SLEEP);
+
+	enum tracker_wake_reason reason = wake_wait(CONFIG_TRACKER_SLEEP_SECONDS);
+
+	if (reason != TRACKER_WAKE_TIMER) {
+		LOG_INF("Woke early: %s", wake_reason_name(reason));
+	}
+
+	return reason;
 }
 
 int main(void)
@@ -165,6 +368,10 @@ int main(void)
 		LOG_WRN("power_init failed; running without charge detection");
 	}
 
+	if (motion_init()) {
+		LOG_WRN("motion_init failed; running without wake-on-motion");
+	}
+
 	(void)status_led_init();
 
 	if (gnss_init()) {
@@ -183,51 +390,139 @@ int main(void)
 		(void)lte_lc_psm_req(true);
 	}
 
+	/* Last: needs the modem library up, but no network. Reports a missing
+	 * credential at boot rather than after the first failed connect.
+	 */
+	if (cloud_init()) {
+		LOG_ERR("Cloud transport init failed; reports will not be sent");
+	}
+
 	status_led_report(false);
+
+	enum tracker_wake_reason wake_reason = TRACKER_WAKE_BOOT;
 
 	while (1) {
 		uint32_t wake_uptime_ms = (uint32_t)k_uptime_get();
+		bool motion_cycle = wake_reason == TRACKER_WAKE_MOTION;
 
+		/* Power was applied at some point, so someone was there: restart
+		 * the settle count even if it has gone away again by now.
+		 */
+		if (wake_reason == TRACKER_WAKE_VBUS) {
+			battery_sleeps = 0;
+		}
+
+		watchdog_phase(TRACKER_PHASE_WAKE);
 		watchdog_feed();
+
+		if (!IS_ENABLED(CONFIG_TRACKER_SKIP_LTE)) {
+			recover_if_silent();
+		}
 
 		/* Bring up the network (unless in GNSS-only bench mode). On failure,
 		 * sleep and retry - the original "sleep 9 min, try again" behavior.
 		 */
 		if (!IS_ENABLED(CONFIG_TRACKER_SKIP_LTE)) {
+			watchdog_phase(TRACKER_PHASE_LTE);
 			if (lte_ensure_connected() != 0) {
 				LOG_WRN("Network unavailable, sleeping before retry");
 				status_led_set(TRACKER_STATUS_NO_LTE);
-				status_led_sleep();
-				power_wait_interruptible(CONFIG_TRACKER_SLEEP_SECONDS);
+				wake_reason = battery_sleep();
 				continue;
 			}
 		}
+
+		/* Bring the cloud link up before GNSS starts: in LTE-M/GPS
+		 * coexistence the modem time-shares the radio, so the handshake is
+		 * quickest with the receiver off. It also leaves the session warm
+		 * in case the fix attempt below needs assistance data. A failure
+		 * here is not fatal - we still try for a fix and retry the link
+		 * when the report is actually sent.
+		 */
+		watchdog_phase(TRACKER_PHASE_CLOUD_RESUME);
+		watchdog_guard_start(CONFIG_TRACKER_CLOUD_CONNECT_BUDGET_SECONDS);
+		(void)cloud_resume();
+		watchdog_guard_stop();
 
 		/* Registered (or bench mode): yellow until the first fix lands. */
 		status_led_report(false);
 
 		/* Start GNSS and get the first fix of this wake cycle. */
-		struct nrf_modem_gnss_pvt_data_frame pvt;
+		struct tracker_fix fix;
+		bool assisted = false;
 
+		watchdog_phase(TRACKER_PHASE_GNSS_START);
 		if (gnss_start() != 0) {
-			status_led_sleep();
-			power_wait_interruptible(CONFIG_TRACKER_SLEEP_SECONDS);
+			cloud_pause();
+			wake_reason = battery_sleep();
 			continue;
 		}
 
-		if (gnss_wait_fix(&pvt, CONFIG_TRACKER_GNSS_FIX_TIMEOUT_SECONDS) == 0) {
+		/* A-GNSS only helps the onboard receiver, and only when it is the
+		 * one running - gnss_agnss_request_wait() returns -EAGAIN while the
+		 * external module has the cycle, so this whole block is skipped
+		 * until (and unless) the fallback below fires. When the modem is
+		 * running it asks for assistance within a second or two of starting,
+		 * but only when it actually lacks valid data, which makes this a
+		 * reliable cold-start test that costs nothing on a warm receiver.
+		 */
+		if (agnss_wanted() &&
+		    gnss_agnss_request_wait(CONFIG_TRACKER_AGNSS_PROACTIVE_WAIT_SECONDS) == 0) {
+			LOG_INF("Cold start: fetching A-GNSS assistance up front");
+			watchdog_phase(TRACKER_PHASE_AGNSS);
+			assisted = agnss_fetch_and_inject() == 0;
+		}
+
+		watchdog_phase(TRACKER_PHASE_FIX);
+		bool have_fix = gnss_wait_fix(&fix, gnss_fix_timeout_seconds()) == 0;
+
+		/* The external module had its window and did not lock. Hand the
+		 * cycle to the onboard receiver, which is slower but can be assisted.
+		 */
+		if (!have_fix && gnss_fallback_available()) {
+			LOG_WRN("No fix from the external module, falling back to the "
+				"onboard receiver");
+
+			if (gnss_fallback() == 0) {
+				if (agnss_wanted() &&
+				    gnss_agnss_request_wait(
+					    CONFIG_TRACKER_AGNSS_PROACTIVE_WAIT_SECONDS) == 0) {
+					LOG_INF("Cold start: fetching A-GNSS assistance");
+					assisted = agnss_fetch_and_inject() == 0;
+				}
+
+				have_fix = gnss_wait_fix(&fix,
+							 gnss_fix_timeout_seconds()) == 0;
+			}
+		}
+
+		/* Nothing after the full window. If we have not already pulled
+		 * assistance this cycle, it is worth a shot before giving up.
+		 */
+		if (!have_fix && !assisted && agnss_wanted()) {
+			LOG_WRN("No fix after %u s, falling back to A-GNSS assistance",
+				gnss_fix_timeout_seconds());
+
+			if (agnss_fetch_and_inject() == 0) {
+				have_fix = gnss_wait_fix(
+					&fix, CONFIG_TRACKER_AGNSS_FIX_TIMEOUT_SECONDS) == 0;
+			}
+		}
+		watchdog_feed();
+
+		if (have_fix) {
 			/* Let the fix settle briefly for a better position, then
 			 * grab the improved one (original waited ~5 s).
 			 */
 			if (CONFIG_TRACKER_GNSS_EXTRA_FIX_SECONDS > 0) {
 				k_sleep(K_SECONDS(CONFIG_TRACKER_GNSS_EXTRA_FIX_SECONDS));
-				(void)gnss_wait_fix(&pvt, 5);
+				(void)gnss_wait_fix(&fix, 5);
 			}
-			report_fix(&pvt, wake_uptime_ms);
+			report_fix(&fix, wake_uptime_ms, wake_reason);
 			status_led_report(true);
 		} else if (IS_ENABLED(CONFIG_TRACKER_FORCE_PUBLISH_WITHOUT_FIX)) {
 			LOG_WRN("No GNSS fix this cycle, reporting position 0,0");
-			report_fix(NULL, wake_uptime_ms);
+			report_fix(NULL, wake_uptime_ms, wake_reason);
 			status_led_report(false);
 		} else {
 			LOG_WRN("No GNSS fix this cycle, skipping report");
@@ -235,38 +530,69 @@ int main(void)
 		}
 		watchdog_feed();
 
-		if (power_is_charging()) {
-			/* Externally powered: keep GNSS running (stays locked) so
-			 * each subsequent fix is near-instant.
-			 */
-			LOG_INF("Externally powered, reporting every %d s (GNSS kept on)",
+		/* Frequent reporting, for either of the two reasons we do it: the
+		 * car is running, or something just moved the car. They are the
+		 * same loop - GNSS stays running so each fix is near-instant - and
+		 * differ only in what keeps them going, so a jolt that turns out to
+		 * be the owner getting in flows straight into normal powered
+		 * operation without a gap.
+		 */
+		if (power_vbus_present() || surge_active(motion_cycle)) {
+			LOG_INF("%s, reporting every %d s (GNSS kept on)",
+				power_vbus_present() ? "Externally powered" : "Motion surge",
 				CONFIG_TRACKER_CHARGING_INTERVAL_SECONDS);
-			while (power_is_charging()) {
+
+			while (power_vbus_present() || surge_active(motion_cycle)) {
+				watchdog_phase(TRACKER_PHASE_FREQUENT);
+
+				if (power_vbus_present()) {
+					/* Watching for jolts is pointless while the
+					 * car is running: every bump would raise an
+					 * event we discard, each costing a
+					 * transaction on the PMIC's bus. Being
+					 * powered also restarts the settle count, so
+					 * every unplug gets the full grace period.
+					 */
+					motion_set_armed(false);
+					battery_sleeps = 0;
+				}
+
 				k_sleep(K_SECONDS(CONFIG_TRACKER_CHARGING_INTERVAL_SECONDS));
 				watchdog_feed();
-				if (gnss_wait_fix(&pvt, 10) == 0) {
-					report_fix(&pvt, wake_uptime_ms);
+				if (gnss_wait_fix(&fix, 10) == 0) {
+					report_fix(&fix, wake_uptime_ms, wake_reason);
 					status_led_report(true);
 				} else if (IS_ENABLED(CONFIG_TRACKER_FORCE_PUBLISH_WITHOUT_FIX)) {
 					LOG_WRN("No GNSS fix, reporting position 0,0");
-					report_fix(NULL, wake_uptime_ms);
+					report_fix(NULL, wake_uptime_ms, wake_reason);
 					status_led_report(false);
 				} else {
 					LOG_WRN("No GNSS fix, skipping report");
 					status_led_report(false);
 				}
 			}
-			gnss_stop();
-		} else {
-			/* On battery: stop GNSS and sleep, waking early on external power. */
-			gnss_stop();
-			LOG_INF("On battery, sleeping up to %d s",
-				CONFIG_TRACKER_SLEEP_SECONDS);
-			status_led_sleep();
-			if (power_wait_interruptible(CONFIG_TRACKER_SLEEP_SECONDS)) {
-				LOG_INF("External power applied, waking early");
-			}
+
+			/* Fall through to the sleep below rather than looping straight
+			 * into another cycle: the tracker is on battery from this
+			 * moment, and an immediate re-acquire would cost a full fix
+			 * window (up to the external timeout plus the modem fallback)
+			 * with nothing to show for it.
+			 */
+			LOG_INF("Frequent reporting over, back to the battery cycle");
 		}
+
+		/* On battery: stop GNSS and sleep, waking early on external power or
+		 * a jolt.
+		 */
+		watchdog_phase(TRACKER_PHASE_GNSS_STOP);
+		gnss_stop();
+		/* Keep the session state so the next cycle can resume without paying
+		 * for another handshake.
+		 */
+		watchdog_phase(TRACKER_PHASE_CLOUD_PAUSE);
+		cloud_pause();
+		LOG_INF("On battery, sleeping up to %d s", CONFIG_TRACKER_SLEEP_SECONDS);
+		wake_reason = battery_sleep();
 	}
 
 	return 0;
